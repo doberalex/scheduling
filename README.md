@@ -26,8 +26,25 @@ cp .env.example .env
 ```bash
 BOT_TOKEN=telegram_token_from_botfather
 ADMIN_IDS=62602216
-DATA_FILE=data/settings.json
 TIMEZONE=Europe/Moscow
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=doberalex_tbotschedule
+DB_PASSWORD=database_password
+DB_NAME=doberalex_tbotschedule
+```
+
+Все рабочие данные хранятся в MySQL. Бот сам создаёт таблицы при первом запуске:
+
+- `schedule_participants`
+- `schedule_limits`
+- `schedule_participant_lists`
+- `schedule_extra_dates`
+
+Явная инициализация базы:
+
+```bash
+python3 scripts/init_db.py
 ```
 
 ## Запуск

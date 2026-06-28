@@ -14,10 +14,11 @@ load_dotenv(BASE_DIR / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow").strip()
-DATA_FILE = Path(os.getenv("DATA_FILE", "data/settings.json"))
-
-if not DATA_FILE.is_absolute():
-    DATA_FILE = BASE_DIR / DATA_FILE
+DB_HOST = os.getenv("DB_HOST", "localhost").strip()
+DB_PORT = int(os.getenv("DB_PORT", "3306").strip())
+DB_USER = os.getenv("DB_USER", "doberalex_tbotschedule").strip()
+DB_PASSWORD = os.getenv("DB_PASSWORD", "").strip()
+DB_NAME = os.getenv("DB_NAME", "doberalex_tbotschedule").strip()
 
 
 def parse_admin_ids(value: str) -> set[int]:

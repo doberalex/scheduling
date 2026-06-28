@@ -11,7 +11,7 @@ from app.config import ADMIN_IDS
 from app.keyboards.main_keyboard import main_keyboard
 from app.services.formatters import format_schedule, format_settings
 from app.services.scheduler import generate, parse_date
-from app.services.settings_store import data_file_path, load_settings, save_settings
+from app.services.settings_store import load_settings, save_settings
 
 
 router = Router()
@@ -54,7 +54,7 @@ def parse_month_args(text: str) -> tuple[int, int]:
 
 async def show_schedule(message: Message, year: int | None = None, month: int | None = None) -> None:
     now = datetime.now()
-    settings = load_settings()
+    settings = await load_settings()
     result = generate(settings, year or now.year, month or now.month)
 
     await message.answer(format_schedule(result))
@@ -102,12 +102,12 @@ async def schedule_command(message: Message) -> None:
 
 @router.message(Command("settings"))
 async def settings_command(message: Message) -> None:
-    await message.answer(format_settings(load_settings()))
+    await message.answer(format_settings(await load_settings()))
 
 
 @router.message(Command("participants"))
 async def participants_command(message: Message) -> None:
-    settings = load_settings()
+    settings = await load_settings()
     await message.answer("<b>Участники</b>\n" + "\n".join(f"• {name}" for name in settings["people"]))
 
 
@@ -173,9 +173,9 @@ async def limit_command(message: Message) -> None:
         await message.answer("Лимит должен быть от 0 до 20.")
         return
 
-    settings = load_settings()
+    settings = await load_settings()
     settings["limits"][parts[1]] = value
-    save_settings(settings)
+    await save_settings(settings)
     await message.answer("Лимит обновлен.")
 
 
@@ -198,12 +198,12 @@ async def schedule_button(message: Message) -> None:
 
 @router.message(F.text == "Настройки")
 async def settings_button(message: Message) -> None:
-    await message.answer(format_settings(load_settings()))
+    await message.answer(format_settings(await load_settings()))
 
 
 @router.message(F.text == "Участники")
 async def participants_button(message: Message) -> None:
-    settings = load_settings()
+    settings = await load_settings()
     await message.answer("<b>Участники</b>\n" + "\n".join(f"• {name}" for name in settings["people"]))
 
 
@@ -279,19 +279,19 @@ async def add_person(message: Message, name: str) -> None:
         await message.answer("Имя не указано.")
         return
 
-    settings = load_settings()
+    settings = await load_settings()
 
     if name in settings["people"]:
         await message.answer("Такой участник уже есть.")
         return
 
     settings["people"].append(name)
-    save_settings(settings)
+    await save_settings(settings)
     await message.answer(f"Участник добавлен: {name}")
 
 
 async def remove_person(message: Message, name: str) -> None:
-    settings = load_settings()
+    settings = await load_settings()
 
     if name not in settings["people"]:
         await message.answer("Такого участника нет.")
@@ -302,7 +302,7 @@ async def remove_person(message: Message, name: str) -> None:
     for key in ["blockedStart", "singleParticipation", "onlySunday"]:
         settings[key] = [value for value in settings[key] if value != name]
 
-    save_settings(settings)
+    await save_settings(settings)
     await message.answer(f"Участник удален: {name}")
 
 
@@ -337,7 +337,7 @@ async def update_named_list(message: Message, key: str, action: str, name: str) 
         await message.answer("Имя не указано.")
         return
 
-    settings = load_settings()
+    settings = await load_settings()
 
     if name not in settings["people"]:
         await message.answer("Сначала добавьте участника в общий список.")
@@ -351,7 +351,7 @@ async def update_named_list(message: Message, key: str, action: str, name: str) 
         settings[key] = [value for value in settings[key] if value != name]
         result = "удален"
 
-    save_settings(settings)
+    await save_settings(settings)
     await message.answer(f"{name} {result} в {key}.")
 
 
@@ -368,9 +368,9 @@ async def update_limit_from_text(message: Message, text: str) -> None:
         await message.answer("Лимит должен быть числом.")
         return
 
-    settings = load_settings()
+    settings = await load_settings()
     settings["limits"][parts[0]] = value
-    save_settings(settings)
+    await save_settings(settings)
     await message.answer("Лимит обновлен.")
 
 
@@ -392,7 +392,7 @@ async def update_extra_date(message: Message, slot_type: str, action: str, value
         return
 
     date_value = parsed.strftime("%d.%m.%Y")
-    settings = load_settings()
+    settings = await load_settings()
     values = settings["extraDates"][slot_type]
 
     if action == "add":
@@ -403,6 +403,5 @@ async def update_extra_date(message: Message, slot_type: str, action: str, value
         settings["extraDates"][slot_type] = [item for item in values if item != date_value]
         result = "удалена"
 
-    save_settings(settings)
+    await save_settings(settings)
     await message.answer(f"Дата {date_value} {result}.")
-

@@ -4,6 +4,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from app.config import BOT_TOKEN
 from app.handlers import router
+from app.services.settings_store import close_db, init_db
 
 
 async def main() -> None:
@@ -17,5 +18,9 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
 
-    await dp.start_polling(bot)
+    await init_db()
 
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await close_db()
