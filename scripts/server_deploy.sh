@@ -9,7 +9,7 @@ PYTHON_BIN="python3"
 PIP_BIN="python3 -m pip"
 PIP_INSTALL_ARGS="--user"
 
-if [ -d venv ] && [ ! -x venv/bin/python ]; then
+if [ -d venv ] && { [ ! -x venv/bin/python ] || ! venv/bin/python -m pip --version >/dev/null 2>&1; }; then
     rm -rf venv
 fi
 
