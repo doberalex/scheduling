@@ -1,4 +1,6 @@
-# Scheduling Telegram Bot
+# scheduling
+
+Telegram bot project on Python.
 
 Telegram-бот для управления расписаниями пятниц и воскресений. Правила перенесены из `scheduling.php`: лимиты по типам дней, запрет первых двух слотов, одиночное участие, только воскресенье, интервал между назначениями и проверка итогового расписания.
 
@@ -62,4 +64,3 @@ Remote:
 ```bash
 git@github.com:doberalex/scheduling.git
 ```
-
