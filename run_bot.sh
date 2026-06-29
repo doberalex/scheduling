@@ -3,7 +3,7 @@
 PROJECT_DIR="/home/d/doberalex/public_html/scheduling"
 PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
 
-if [ ! -x "$PYTHON_BIN" ]; then
+if [ ! -x "$PYTHON_BIN" ] || ! "$PYTHON_BIN" -c "import aiogram" >/dev/null 2>&1; then
     PYTHON_BIN="python3"
 fi
 
