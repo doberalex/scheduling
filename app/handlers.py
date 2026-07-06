@@ -51,6 +51,17 @@ def now_month() -> tuple[int, int]:
     return now.year, now.month
 
 
+def next_month(year: int, month: int) -> tuple[int, int]:
+    if month == 12:
+        return year + 1, 1
+
+    return year, month + 1
+
+
+def month_label(year: int, month: int) -> str:
+    return f"{month:02d}.{year}"
+
+
 def set_last_month(message: Message, year: int, month: int) -> None:
     if message.from_user:
         last_month_by_user[message.from_user.id] = (year, month)
@@ -67,6 +78,19 @@ def simple_keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=value) for value in row] for row in rows],
         resize_keyboard=True,
+    )
+
+
+def month_choice_keyboard() -> ReplyKeyboardMarkup:
+    current_year, current_month = now_month()
+    next_year, next_month_value = next_month(current_year, current_month)
+    return simple_keyboard(
+        [
+            [f"📍 Текущий месяц {month_label(current_year, current_month)}"],
+            [f"➡️ Следующий месяц {month_label(next_year, next_month_value)}"],
+            ["🚫 Отмена"],
+            ["🏠 Главное меню"],
+        ]
     )
 
 
@@ -118,6 +142,17 @@ async def generated_schedule(year: int, month: int):
     return generate(settings, year, month)
 
 
+async def ensure_saved_schedule(year: int, month: int) -> tuple[dict[str, Any] | None, bool]:
+    saved = await get_saved_schedule(year, month)
+
+    if saved:
+        return saved, False
+
+    result = await generated_schedule(year, month)
+    await save_schedule_result(result)
+    return await get_saved_schedule(year, month), True
+
+
 async def show_schedule(message: Message, year: int | None = None, month: int | None = None) -> None:
     year = year or now_month()[0]
     month = month or now_month()[1]
@@ -130,6 +165,25 @@ async def show_schedule(message: Message, year: int | None = None, month: int | 
 
     result = await generated_schedule(year, month)
     await message.answer(format_schedule(result), reply_markup=schedule_keyboard(require_admin(message)))
+
+
+async def ask_month(message: Message, action: str, prompt: str = "Выберите месяц:") -> None:
+    if not message.from_user:
+        return
+
+    pending_actions[message.from_user.id] = {"action": "choose_month", "next_action": action}
+    await message.answer(prompt, reply_markup=month_choice_keyboard())
+
+
+def parse_month_choice(text: str) -> tuple[int, int] | None:
+    if text.startswith("📍 Текущий месяц"):
+        return now_month()
+
+    if text.startswith("➡️ Следующий месяц"):
+        current_year, current_month = now_month()
+        return next_month(current_year, current_month)
+
+    return None
 
 
 async def slot_keyboard(year: int, month: int) -> ReplyKeyboardMarkup | None:
@@ -226,9 +280,20 @@ async def remove_name_command(message: Message) -> None:
     await remove_person(message, name)
 
 
-@router.message(F.text.in_({"📅 График", "Расписание", "📆 Показать график"}))
+@router.message(F.text.in_({"📅 График", "Расписание"}))
+async def schedule_menu_button(message: Message) -> None:
+    await answer_schedule_menu(message, "Раздел графика.")
+
+
+@router.message(F.text == "📆 Показать график")
 async def schedule_button(message: Message) -> None:
-    await show_schedule(message)
+    await ask_month(message, "show_schedule")
+
+
+@router.message(F.text == "➡️ Следующий месяц")
+async def next_month_button(message: Message) -> None:
+    year, month = next_month(*now_month())
+    await show_schedule(message, year, month)
 
 
 @router.message(F.text.in_({"⚙️ Настройки", "Настройки"}))
@@ -266,12 +331,26 @@ async def save_schedule_button(message: Message) -> None:
         await message.answer("Нет доступа.")
         return
 
-    year, month = get_last_month(message)
+    await ask_month(message, "save_schedule", "Какой месяц сохранить?")
+
+
+@router.message(F.text == "🔄 Пересохранить месяц")
+async def resave_schedule_button(message: Message) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    await ask_month(message, "resave_schedule", "Какой месяц полностью пересохранить?")
+
+
+async def save_schedule_for_month(message: Message, year: int, month: int, resave: bool = False) -> None:
     result = await generated_schedule(year, month)
     await save_schedule_result(result)
     saved = await get_saved_schedule(year, month)
+    set_last_month(message, year, month)
+    prefix = "График полностью пересохранён." if resave else "График сохранён."
     await message.answer(
-        "График сохранён.\n\n" + format_saved_schedule(saved),
+        prefix + "\n\n" + format_saved_schedule(saved),
         reply_markup=schedule_keyboard(True),
     )
 
@@ -282,29 +361,35 @@ async def publish_button(message: Message) -> None:
         await message.answer("Нет доступа.")
         return
 
-    year, month = get_last_month(message)
     status = "published" if message.text == "📣 Опубликовать" else "unpublished"
-
-    if not await set_schedule_status(year, month, status):
-        await message.answer("Сначала сохраните график.")
-        return
-
-    await show_schedule(message, year, month)
+    await ask_month(
+        message,
+        "publish_schedule" if status == "published" else "unpublish_schedule",
+        "Для какого месяца изменить статус?",
+    )
 
 
 @router.message(F.text == "✏️ Редактировать участие")
 async def edit_slot_button(message: Message) -> None:
-    await start_slot_action(message, "replace_slot")
+    await ask_slot_month(message, "replace_slot", "За какой месяц редактировать участие?")
 
 
 @router.message(F.text == "✅ Отметить участие")
 async def attendance_button(message: Message) -> None:
-    await start_slot_action(message, "attendance_slot")
+    await ask_slot_month(message, "attendance_slot", "За какой месяц отметить участие?")
 
 
 @router.message(F.text == "➕ Вне графика")
 async def extra_participant_button(message: Message) -> None:
-    await start_slot_action(message, "extra_slot")
+    await ask_slot_month(message, "extra_slot", "За какой месяц добавить вне графика?")
+
+
+async def ask_slot_month(message: Message, action: str, prompt: str) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    await ask_month(message, action, prompt)
 
 
 async def start_slot_action(message: Message, action: str) -> None:
@@ -313,13 +398,24 @@ async def start_slot_action(message: Message, action: str) -> None:
         return
 
     year, month = get_last_month(message)
+    await start_slot_action_for_month(message, action, year, month)
+
+
+async def start_slot_action_for_month(message: Message, action: str, year: int, month: int) -> None:
+    saved, created = await ensure_saved_schedule(year, month)
     keyboard = await slot_keyboard(year, month)
 
-    if keyboard is None:
-        await message.answer("Сначала сохраните график.")
+    if saved is None or keyboard is None:
+        await message.answer("Не удалось подготовить график для редактирования.", reply_markup=schedule_keyboard(True))
         return
 
+    set_last_month(message, year, month)
     pending_actions[message.from_user.id] = {"action": action, "year": year, "month": month}
+    if created:
+        await message.answer(
+            f"График на {month_label(year, month)} ещё не был сохранён, поэтому я сохранил расчётный вариант.",
+            reply_markup=schedule_keyboard(True),
+        )
     await message.answer("Выберите дату:", reply_markup=keyboard)
 
 
@@ -417,7 +513,9 @@ async def text_handler(message: Message) -> None:
     text = message.text or ""
     action = state["action"]
 
-    if action == "add_person":
+    if action == "choose_month":
+        await handle_month_choice(message, state, text)
+    elif action == "add_person":
         pending_actions.pop(message.from_user.id, None)
         await add_person(message, normalise_name(text))
     elif action == "remove_person":
@@ -445,6 +543,52 @@ async def text_handler(message: Message) -> None:
     elif action == "extra_update":
         pending_actions.pop(message.from_user.id, None)
         await update_extra_from_text(message, text)
+
+
+async def handle_month_choice(message: Message, state: dict[str, Any], text: str) -> None:
+    selected = parse_month_choice(text)
+
+    if selected is None:
+        await message.answer("Выберите месяц кнопкой.")
+        return
+
+    year, month = selected
+    next_action = state["next_action"]
+    pending_actions.pop(message.from_user.id, None)
+    set_last_month(message, year, month)
+
+    if next_action == "show_schedule":
+        await show_schedule(message, year, month)
+    elif next_action == "save_schedule":
+        await save_schedule_for_month(message, year, month)
+    elif next_action == "resave_schedule":
+        await save_schedule_for_month(message, year, month, resave=True)
+    elif next_action == "publish_schedule":
+        await update_schedule_status_for_month(message, year, month, "published")
+    elif next_action == "unpublish_schedule":
+        await update_schedule_status_for_month(message, year, month, "unpublished")
+    elif next_action in {"replace_slot", "attendance_slot", "extra_slot"}:
+        await start_slot_action_for_month(message, next_action, year, month)
+
+
+async def update_schedule_status_for_month(message: Message, year: int, month: int, status: str) -> None:
+    saved, created = await ensure_saved_schedule(year, month)
+
+    if saved is None:
+        await message.answer("Не удалось подготовить график.", reply_markup=schedule_keyboard(True))
+        return
+
+    if not await set_schedule_status(year, month, status):
+        await message.answer("Не удалось изменить статус.", reply_markup=schedule_keyboard(True))
+        return
+
+    if created:
+        await message.answer(
+            f"График на {month_label(year, month)} ещё не был сохранён, поэтому я сохранил расчётный вариант.",
+            reply_markup=schedule_keyboard(True),
+        )
+
+    await show_schedule(message, year, month)
 
 
 async def handle_slot_selection(message: Message, state: dict[str, Any], text: str) -> None:

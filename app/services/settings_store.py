@@ -227,6 +227,36 @@ async def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schedule_attendance_events (
+                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    schedule_id INT UNSIGNED NOT NULL,
+                    slot_id INT UNSIGNED NOT NULL,
+                    participant_id INT UNSIGNED NOT NULL,
+                    is_scheduled TINYINT NOT NULL DEFAULT 1,
+                    attendance_status VARCHAR(32) NOT NULL,
+                    event_type VARCHAR(32) NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    KEY idx_attendance_events_schedule (schedule_id),
+                    KEY idx_attendance_events_slot (slot_id),
+                    KEY idx_attendance_events_participant (participant_id),
+                    CONSTRAINT fk_attendance_events_month
+                        FOREIGN KEY (schedule_id)
+                        REFERENCES schedule_months (id)
+                        ON DELETE CASCADE,
+                    CONSTRAINT fk_attendance_events_slot
+                        FOREIGN KEY (slot_id)
+                        REFERENCES schedule_slots (id)
+                        ON DELETE CASCADE,
+                    CONSTRAINT fk_attendance_events_person
+                        FOREIGN KEY (participant_id)
+                        REFERENCES schedule_participants (id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
             await cursor.execute("SET sql_notes=1")
             await cursor.execute("SELECT COUNT(*) FROM schedule_participants")
             row = await cursor.fetchone()
@@ -265,6 +295,32 @@ async def _slot_id(cursor: aiomysql.Cursor, schedule_id: int, slot_no: int) -> i
     )
     row = await cursor.fetchone()
     return int(row[0]) if row else None
+
+
+async def _log_attendance_event(
+    cursor: aiomysql.Cursor,
+    schedule_id: int,
+    slot_id: int,
+    participant_id: int,
+    is_scheduled: bool,
+    attendance_status: str,
+    event_type: str,
+) -> None:
+    await cursor.execute(
+        """
+        INSERT INTO schedule_attendance_events
+            (schedule_id, slot_id, participant_id, is_scheduled, attendance_status, event_type)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (
+            schedule_id,
+            slot_id,
+            participant_id,
+            1 if is_scheduled else 0,
+            attendance_status,
+            event_type,
+        ),
+    )
 
 
 def _parse_date_text(value: str) -> date:
@@ -436,6 +492,15 @@ async def save_schedule_result(result: ScheduleResult) -> None:
                         """,
                         (slot_id, participant_id, sort_order),
                     )
+                    await _log_attendance_event(
+                        cursor,
+                        schedule_id,
+                        slot_id,
+                        participant_id,
+                        True,
+                        "planned",
+                        "save_schedule",
+                    )
 
 
 async def get_saved_schedule(year: int, month: int) -> dict[str, Any] | None:
@@ -565,6 +630,15 @@ async def replace_slot_participants(year: int, month: int, slot_no: int, names: 
                     """,
                     (slot_id, participant_id, sort_order),
                 )
+                await _log_attendance_event(
+                    cursor,
+                    schedule_id,
+                    slot_id,
+                    participant_id,
+                    True,
+                    "planned",
+                    "replace_slot",
+                )
 
     return True
 
@@ -594,12 +668,36 @@ async def set_slot_participant_attendance(
 
             await cursor.execute(
                 """
+                SELECT sp.participant_id, sp.is_scheduled
+                FROM schedule_slot_participants sp
+                INNER JOIN schedule_participants p ON p.id = sp.participant_id
+                WHERE sp.slot_id=%s AND p.name=%s
+                """,
+                (slot_id, name),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return False
+
+            participant_id = int(row[0])
+            is_scheduled = bool(row[1])
+            await cursor.execute(
+                """
                 UPDATE schedule_slot_participants sp
                 INNER JOIN schedule_participants p ON p.id = sp.participant_id
                 SET sp.attendance_status=%s
                 WHERE sp.slot_id=%s AND p.name=%s
                 """,
                 (status, slot_id, name),
+            )
+            await _log_attendance_event(
+                cursor,
+                schedule_id,
+                slot_id,
+                participant_id,
+                is_scheduled,
+                status,
+                "attendance_status",
             )
 
     return True
@@ -638,6 +736,15 @@ async def add_extra_slot_participant(year: int, month: int, slot_no: int, name: 
                     sort_order=VALUES(sort_order)
                 """,
                 (slot_id, participant_id, sort_order),
+            )
+            await _log_attendance_event(
+                cursor,
+                schedule_id,
+                slot_id,
+                participant_id,
+                False,
+                "attended",
+                "extra_participant",
             )
 
     return True

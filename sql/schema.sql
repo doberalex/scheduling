@@ -80,3 +80,30 @@ CREATE TABLE IF NOT EXISTS schedule_slot_participants (
         REFERENCES schedule_participants (id)
         ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS schedule_attendance_events (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    schedule_id INT UNSIGNED NOT NULL,
+    slot_id INT UNSIGNED NOT NULL,
+    participant_id INT UNSIGNED NOT NULL,
+    is_scheduled TINYINT NOT NULL DEFAULT 1,
+    attendance_status VARCHAR(32) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_attendance_events_schedule (schedule_id),
+    KEY idx_attendance_events_slot (slot_id),
+    KEY idx_attendance_events_participant (participant_id),
+    CONSTRAINT fk_attendance_events_month
+        FOREIGN KEY (schedule_id)
+        REFERENCES schedule_months (id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_attendance_events_slot
+        FOREIGN KEY (slot_id)
+        REFERENCES schedule_slots (id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_attendance_events_person
+        FOREIGN KEY (participant_id)
+        REFERENCES schedule_participants (id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

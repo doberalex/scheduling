@@ -5,9 +5,9 @@ STATUS_LABELS = {
     "unpublished": "не опубликован",
 }
 ATTENDANCE_LABELS = {
-    "planned": "по плану",
-    "attended": "был",
-    "missed": "пропустил",
+    "planned": "📌",
+    "attended": "✅",
+    "missed": "❌",
 }
 
 
