@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date
 from typing import Any
 
 import aiomysql
 
 from app.config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER
+from app.services.scheduler import ScheduleResult
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -62,6 +64,8 @@ LIST_KEYS = {
     "onlySunday",
 }
 SLOT_TYPES = {"fri", "sun"}
+SCHEDULE_STATUSES = {"published", "unpublished"}
+ATTENDANCE_STATUSES = {"planned", "attended", "missed"}
 
 pool: aiomysql.Pool | None = None
 
@@ -167,6 +171,62 @@ async def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schedule_months (
+                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    year_value INT NOT NULL,
+                    month_value INT NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'unpublished',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uniq_schedule_month (year_value, month_value)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schedule_slots (
+                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    schedule_id INT UNSIGNED NOT NULL,
+                    slot_no INT NOT NULL,
+                    slot_type VARCHAR(16) NOT NULL,
+                    date_value DATE NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uniq_schedule_slot (schedule_id, slot_no),
+                    CONSTRAINT fk_schedule_slots_month
+                        FOREIGN KEY (schedule_id)
+                        REFERENCES schedule_months (id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schedule_slot_participants (
+                    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    slot_id INT UNSIGNED NOT NULL,
+                    participant_id INT UNSIGNED NOT NULL,
+                    is_scheduled TINYINT NOT NULL DEFAULT 1,
+                    attendance_status VARCHAR(32) NOT NULL DEFAULT 'planned',
+                    sort_order INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uniq_slot_participant (slot_id, participant_id),
+                    CONSTRAINT fk_slot_participants_slot
+                        FOREIGN KEY (slot_id)
+                        REFERENCES schedule_slots (id)
+                        ON DELETE CASCADE,
+                    CONSTRAINT fk_slot_participants_person
+                        FOREIGN KEY (participant_id)
+                        REFERENCES schedule_participants (id)
+                        ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
             await cursor.execute("SET sql_notes=1")
             await cursor.execute("SELECT COUNT(*) FROM schedule_participants")
             row = await cursor.fetchone()
@@ -187,6 +247,29 @@ async def _participant_id(cursor: aiomysql.Cursor, name: str) -> int:
         (name,),
     )
     return int(cursor.lastrowid)
+
+
+async def _schedule_id(cursor: aiomysql.Cursor, year: int, month: int) -> int | None:
+    await cursor.execute(
+        "SELECT id FROM schedule_months WHERE year_value=%s AND month_value=%s",
+        (year, month),
+    )
+    row = await cursor.fetchone()
+    return int(row[0]) if row else None
+
+
+async def _slot_id(cursor: aiomysql.Cursor, schedule_id: int, slot_no: int) -> int | None:
+    await cursor.execute(
+        "SELECT id FROM schedule_slots WHERE schedule_id=%s AND slot_no=%s",
+        (schedule_id, slot_no),
+    )
+    row = await cursor.fetchone()
+    return int(row[0]) if row else None
+
+
+def _parse_date_text(value: str) -> date:
+    day, month, year = value.split(".")
+    return date(int(year), int(month), int(day))
 
 
 async def load_settings() -> dict[str, Any]:
@@ -311,6 +394,276 @@ async def save_settings(settings: dict[str, Any]) -> None:
                         """,
                         (slot_type, date_text),
                     )
+
+
+async def save_schedule_result(result: ScheduleResult) -> None:
+    await init_db()
+    db_pool = await connect_db()
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO schedule_months (year_value, month_value, status)
+                VALUES (%s, %s, 'unpublished')
+                ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP
+                """,
+                (result.year, result.month),
+            )
+            schedule_id = await _schedule_id(cursor, result.year, result.month)
+            if schedule_id is None:
+                return
+
+            await cursor.execute("DELETE FROM schedule_slots WHERE schedule_id=%s", (schedule_id,))
+
+            for slot_no, slot_type in result.slots.items():
+                await cursor.execute(
+                    """
+                    INSERT INTO schedule_slots (schedule_id, slot_no, slot_type, date_value)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (schedule_id, slot_no, slot_type, _parse_date_text(result.slot_dates[slot_no])),
+                )
+                slot_id = int(cursor.lastrowid)
+
+                for sort_order, name in enumerate(result.schedule.get(slot_no, []), start=1):
+                    participant_id = await _participant_id(cursor, name)
+                    await cursor.execute(
+                        """
+                        INSERT INTO schedule_slot_participants
+                            (slot_id, participant_id, is_scheduled, attendance_status, sort_order)
+                        VALUES (%s, %s, 1, 'planned', %s)
+                        """,
+                        (slot_id, participant_id, sort_order),
+                    )
+
+
+async def get_saved_schedule(year: int, month: int) -> dict[str, Any] | None:
+    await init_db()
+    db_pool = await connect_db()
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                """
+                SELECT id, status
+                FROM schedule_months
+                WHERE year_value=%s AND month_value=%s
+                """,
+                (year, month),
+            )
+            schedule = await cursor.fetchone()
+
+            if not schedule:
+                return None
+
+            await cursor.execute(
+                """
+                SELECT
+                    s.id AS slot_id,
+                    s.slot_no,
+                    s.slot_type,
+                    DATE_FORMAT(s.date_value, '%%d.%%m.%%Y') AS date_text,
+                    p.name,
+                    sp.is_scheduled,
+                    sp.attendance_status,
+                    sp.sort_order
+                FROM schedule_slots s
+                LEFT JOIN schedule_slot_participants sp ON sp.slot_id = s.id
+                LEFT JOIN schedule_participants p ON p.id = sp.participant_id
+                WHERE s.schedule_id=%s
+                ORDER BY s.slot_no, sp.is_scheduled DESC, sp.sort_order, p.name
+                """,
+                (schedule["id"],),
+            )
+            rows = await cursor.fetchall()
+
+    slots: dict[int, dict[str, Any]] = {}
+
+    for row in rows:
+        slot_no = int(row["slot_no"])
+        slots.setdefault(
+            slot_no,
+            {
+                "slot_no": slot_no,
+                "slot_type": row["slot_type"],
+                "date": row["date_text"],
+                "participants": [],
+            },
+        )
+
+        if row["name"]:
+            slots[slot_no]["participants"].append(
+                {
+                    "name": row["name"],
+                    "is_scheduled": bool(row["is_scheduled"]),
+                    "attendance_status": row["attendance_status"],
+                }
+            )
+
+    return {
+        "id": int(schedule["id"]),
+        "year": year,
+        "month": month,
+        "status": schedule["status"],
+        "slots": [slots[key] for key in sorted(slots)],
+    }
+
+
+async def set_schedule_status(year: int, month: int, status: str) -> bool:
+    if status not in SCHEDULE_STATUSES:
+        return False
+
+    await init_db()
+    db_pool = await connect_db()
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            schedule_id = await _schedule_id(cursor, year, month)
+            if schedule_id is None:
+                return False
+
+            await cursor.execute(
+                "UPDATE schedule_months SET status=%s WHERE id=%s",
+                (status, schedule_id),
+            )
+
+    return True
+
+
+async def replace_slot_participants(year: int, month: int, slot_no: int, names: list[str]) -> bool:
+    await init_db()
+    names = list(dict.fromkeys(names))
+    db_pool = await connect_db()
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            schedule_id = await _schedule_id(cursor, year, month)
+            if schedule_id is None:
+                return False
+
+            slot_id = await _slot_id(cursor, schedule_id, slot_no)
+            if slot_id is None:
+                return False
+
+            await cursor.execute(
+                "DELETE FROM schedule_slot_participants WHERE slot_id=%s AND is_scheduled=1",
+                (slot_id,),
+            )
+
+            for sort_order, name in enumerate(names, start=1):
+                participant_id = await _participant_id(cursor, name)
+                await cursor.execute(
+                    """
+                    INSERT INTO schedule_slot_participants
+                        (slot_id, participant_id, is_scheduled, attendance_status, sort_order)
+                    VALUES (%s, %s, 1, 'planned', %s)
+                    ON DUPLICATE KEY UPDATE
+                        is_scheduled=1,
+                        attendance_status='planned',
+                        sort_order=VALUES(sort_order)
+                    """,
+                    (slot_id, participant_id, sort_order),
+                )
+
+    return True
+
+
+async def set_slot_participant_attendance(
+    year: int,
+    month: int,
+    slot_no: int,
+    name: str,
+    status: str,
+) -> bool:
+    if status not in ATTENDANCE_STATUSES:
+        return False
+
+    await init_db()
+    db_pool = await connect_db()
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            schedule_id = await _schedule_id(cursor, year, month)
+            if schedule_id is None:
+                return False
+
+            slot_id = await _slot_id(cursor, schedule_id, slot_no)
+            if slot_id is None:
+                return False
+
+            await cursor.execute(
+                """
+                UPDATE schedule_slot_participants sp
+                INNER JOIN schedule_participants p ON p.id = sp.participant_id
+                SET sp.attendance_status=%s
+                WHERE sp.slot_id=%s AND p.name=%s
+                """,
+                (status, slot_id, name),
+            )
+
+    return True
+
+
+async def add_extra_slot_participant(year: int, month: int, slot_no: int, name: str) -> bool:
+    await init_db()
+    db_pool = await connect_db()
+
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            schedule_id = await _schedule_id(cursor, year, month)
+            if schedule_id is None:
+                return False
+
+            slot_id = await _slot_id(cursor, schedule_id, slot_no)
+            if slot_id is None:
+                return False
+
+            participant_id = await _participant_id(cursor, name)
+            await cursor.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM schedule_slot_participants WHERE slot_id=%s",
+                (slot_id,),
+            )
+            row = await cursor.fetchone()
+            sort_order = int(row[0] or 1)
+
+            await cursor.execute(
+                """
+                INSERT INTO schedule_slot_participants
+                    (slot_id, participant_id, is_scheduled, attendance_status, sort_order)
+                VALUES (%s, %s, 0, 'attended', %s)
+                ON DUPLICATE KEY UPDATE
+                    is_scheduled=0,
+                    attendance_status='attended',
+                    sort_order=VALUES(sort_order)
+                """,
+                (slot_id, participant_id, sort_order),
+            )
+
+    return True
+
+
+async def previous_month_blocked_start(year: int, month: int) -> list[str]:
+    previous_year = year
+    previous_month = month - 1
+
+    if previous_month == 0:
+        previous_month = 12
+        previous_year -= 1
+
+    saved = await get_saved_schedule(previous_year, previous_month)
+
+    if not saved:
+        return []
+
+    blocked = []
+
+    for slot in saved["slots"][-2:]:
+        for participant in slot["participants"]:
+            if participant["attendance_status"] == "attended":
+                blocked.append(participant["name"])
+
+    return list(dict.fromkeys(blocked))
 
 
 async def init_db_if_needed() -> None:

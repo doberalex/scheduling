@@ -33,3 +33,50 @@ CREATE TABLE IF NOT EXISTS schedule_extra_dates (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (slot_type, date_value)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS schedule_months (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    year_value INT NOT NULL,
+    month_value INT NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'unpublished',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uniq_schedule_month (year_value, month_value)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS schedule_slots (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    schedule_id INT UNSIGNED NOT NULL,
+    slot_no INT NOT NULL,
+    slot_type VARCHAR(16) NOT NULL,
+    date_value DATE NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uniq_schedule_slot (schedule_id, slot_no),
+    CONSTRAINT fk_schedule_slots_month
+        FOREIGN KEY (schedule_id)
+        REFERENCES schedule_months (id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS schedule_slot_participants (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    slot_id INT UNSIGNED NOT NULL,
+    participant_id INT UNSIGNED NOT NULL,
+    is_scheduled TINYINT NOT NULL DEFAULT 1,
+    attendance_status VARCHAR(32) NOT NULL DEFAULT 'planned',
+    sort_order INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uniq_slot_participant (slot_id, participant_id),
+    CONSTRAINT fk_slot_participants_slot
+        FOREIGN KEY (slot_id)
+        REFERENCES schedule_slots (id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_slot_participants_person
+        FOREIGN KEY (participant_id)
+        REFERENCES schedule_participants (id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.config import ADMIN_IDS
 from app.keyboards.main_keyboard import main_keyboard
-from app.services.formatters import format_schedule, format_settings
+from app.services.formatters import format_saved_schedule, format_schedule, format_settings
 from app.services.scheduler import generate, parse_date
-from app.services.settings_store import load_settings, save_settings
+from app.services.settings_store import (
+    add_extra_slot_participant,
+    get_saved_schedule,
+    load_settings,
+    previous_month_blocked_start,
+    replace_slot_participants,
+    save_schedule_result,
+    save_settings,
+    set_schedule_status,
+    set_slot_participant_attendance,
+)
 
 
 router = Router()
-pending_actions: dict[int, str] = {}
+pending_actions: dict[int, dict[str, Any]] = {}
+last_month_by_user: dict[int, tuple[int, int]] = {}
 
 
 def is_admin(user_id: int) -> bool:
@@ -26,21 +37,44 @@ def require_admin(message: Message) -> bool:
     return bool(message.from_user and is_admin(message.from_user.id))
 
 
+def normalise_name(value: str) -> str:
+    return " ".join(value.strip().split())
+
+
+def now_month() -> tuple[int, int]:
+    now = datetime.now()
+    return now.year, now.month
+
+
+def set_last_month(message: Message, year: int, month: int) -> None:
+    if message.from_user:
+        last_month_by_user[message.from_user.id] = (year, month)
+
+
+def get_last_month(message: Message) -> tuple[int, int]:
+    if message.from_user and message.from_user.id in last_month_by_user:
+        return last_month_by_user[message.from_user.id]
+
+    return now_month()
+
+
+def simple_keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=value) for value in row] for row in rows],
+        resize_keyboard=True,
+    )
+
+
 async def answer_menu(message: Message, text: str) -> None:
     user_id = message.from_user.id if message.from_user else 0
     await message.answer(text, reply_markup=main_keyboard(is_admin(user_id)))
 
 
-def normalise_name(value: str) -> str:
-    return " ".join(value.strip().split())
-
-
 def parse_month_args(text: str) -> tuple[int, int]:
     parts = text.split()
-    now = datetime.now()
 
     if len(parts) == 1:
-        return now.year, now.month
+        return now_month()
 
     if len(parts) == 2 and "." in parts[1]:
         month_text, year_text = parts[1].split(".", 1)
@@ -49,15 +83,64 @@ def parse_month_args(text: str) -> tuple[int, int]:
     if len(parts) >= 3:
         return int(parts[2]), int(parts[1])
 
-    return now.year, now.month
+    return now_month()
+
+
+async def settings_for_month(year: int, month: int) -> dict:
+    settings = await load_settings()
+    auto_blocked = await previous_month_blocked_start(year, month)
+
+    if auto_blocked:
+        settings["blockedStart"] = auto_blocked
+
+    return settings
+
+
+async def generated_schedule(year: int, month: int):
+    settings = await settings_for_month(year, month)
+    return generate(settings, year, month)
 
 
 async def show_schedule(message: Message, year: int | None = None, month: int | None = None) -> None:
-    now = datetime.now()
-    settings = await load_settings()
-    result = generate(settings, year or now.year, month or now.month)
+    year = year or now_month()[0]
+    month = month or now_month()[1]
+    set_last_month(message, year, month)
+    saved = await get_saved_schedule(year, month)
 
-    await message.answer(format_schedule(result))
+    if saved:
+        await message.answer(format_saved_schedule(saved), reply_markup=main_keyboard(require_admin(message)))
+        return
+
+    result = await generated_schedule(year, month)
+    await message.answer(format_schedule(result), reply_markup=main_keyboard(require_admin(message)))
+
+
+async def slot_keyboard(year: int, month: int) -> ReplyKeyboardMarkup | None:
+    saved = await get_saved_schedule(year, month)
+
+    if not saved:
+        return None
+
+    rows = [[f"{slot['slot_no']}. {slot['date']}"] for slot in saved["slots"]]
+    rows.append(["🚫 Отмена"])
+    return simple_keyboard(rows)
+
+
+def parse_slot_no(text: str) -> int | None:
+    try:
+        return int(text.split(".", 1)[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def participants_keyboard(people: list[str], include_done: bool = False) -> ReplyKeyboardMarkup:
+    rows = [[name] for name in people]
+
+    if include_done:
+        rows.append(["✅ Готово"])
+
+    rows.append(["🚫 Отмена"])
+    return simple_keyboard(rows)
 
 
 @router.message(CommandStart())
@@ -65,11 +148,7 @@ async def start_handler(message: Message) -> None:
     await answer_menu(
         message,
         "Бот управления расписаниями готов.\n\n"
-        "Команды:\n"
-        "/schedule - расписание на текущий месяц\n"
-        "/schedule 7 2026 - расписание на месяц\n"
-        "/settings - настройки\n"
-        "/help - справка",
+        "Основные действия доступны на кнопках.",
     )
 
 
@@ -78,16 +157,12 @@ async def help_handler(message: Message) -> None:
     await answer_menu(
         message,
         "<b>Управление</b>\n\n"
-        "Через кнопки можно добавить или удалить участника, изменить списки blockedStart, "
-        "singleParticipation, onlySunday, лимиты пятниц/воскресений и дополнительные даты.\n\n"
-        "Текстовые команды администратора:\n"
-        "/add_name Имя\n"
-        "/remove_name Имя\n"
-        "/blocked add Имя | /blocked remove Имя\n"
-        "/single add Имя | /single remove Имя\n"
-        "/only_sunday add Имя | /only_sunday remove Имя\n"
-        "/limit fri 3 | /limit sun 5\n"
-        "/extra fri add 15.07.2026 | /extra sun remove 19.07.2026",
+        "📅 График — показать сохранённый или расчётный график.\n"
+        "💾 Сохранить график — сохранить график месяца в БД.\n"
+        "✏️ Редактировать участие — заменить список участников выбранной даты.\n"
+        "✅ Отметить участие — отметить был/пропустил.\n"
+        "➕ Вне графика — добавить участника не по графику.\n"
+        "📣 Опубликовать / 📝 Не публиковать — статус графика.",
     )
 
 
@@ -136,108 +211,145 @@ async def remove_name_command(message: Message) -> None:
     await remove_person(message, name)
 
 
-@router.message(Command("blocked"))
-@admin_command
-async def blocked_command(message: Message) -> None:
-    await update_named_list_from_command(message, "blockedStart", "/blocked")
-
-
-@router.message(Command("single"))
-@admin_command
-async def single_command(message: Message) -> None:
-    await update_named_list_from_command(message, "singleParticipation", "/single")
-
-
-@router.message(Command("only_sunday"))
-@admin_command
-async def only_sunday_command(message: Message) -> None:
-    await update_named_list_from_command(message, "onlySunday", "/only_sunday")
-
-
-@router.message(Command("limit"))
-@admin_command
-async def limit_command(message: Message) -> None:
-    parts = (message.text or "").split(maxsplit=2)
-
-    if len(parts) != 3 or parts[1] not in {"fri", "sun"}:
-        await message.answer("Формат: /limit fri 3 или /limit sun 5")
-        return
-
-    try:
-        value = int(parts[2])
-    except ValueError:
-        await message.answer("Лимит должен быть числом.")
-        return
-
-    if value < 0 or value > 20:
-        await message.answer("Лимит должен быть от 0 до 20.")
-        return
-
-    settings = await load_settings()
-    settings["limits"][parts[1]] = value
-    await save_settings(settings)
-    await message.answer("Лимит обновлен.")
-
-
-@router.message(Command("extra"))
-@admin_command
-async def extra_command(message: Message) -> None:
-    parts = (message.text or "").split(maxsplit=3)
-
-    if len(parts) != 4 or parts[1] not in {"fri", "sun"} or parts[2] not in {"add", "remove"}:
-        await message.answer("Формат: /extra fri add 15.07.2026 или /extra sun remove 19.07.2026")
-        return
-
-    await update_extra_date(message, parts[1], parts[2], parts[3])
-
-
-@router.message(F.text == "Расписание")
+@router.message(F.text.in_({"📅 График", "Расписание"}))
 async def schedule_button(message: Message) -> None:
     await show_schedule(message)
 
 
-@router.message(F.text == "Настройки")
+@router.message(F.text.in_({"⚙️ Настройки", "Настройки"}))
 async def settings_button(message: Message) -> None:
     await message.answer(format_settings(await load_settings()))
 
 
-@router.message(F.text == "Участники")
+@router.message(F.text.in_({"👥 Участники", "Участники"}))
 async def participants_button(message: Message) -> None:
     settings = await load_settings()
     await message.answer("<b>Участники</b>\n" + "\n".join(f"• {name}" for name in settings["people"]))
 
 
-@router.message(F.text == "Помощь")
+@router.message(F.text.in_({"❓ Помощь", "Помощь"}))
 async def help_button(message: Message) -> None:
     await help_handler(message)
 
 
-@router.message(F.text.in_({"Добавить участника", "Удалить участника", "Списки ограничений", "Лимиты", "Доп. даты"}))
-async def admin_button(message: Message) -> None:
+@router.message(F.text == "💾 Сохранить график")
+async def save_schedule_button(message: Message) -> None:
     if not require_admin(message):
         await message.answer("Нет доступа.")
         return
 
-    prompts = {
-        "Добавить участника": ("add_person", "Введите имя участника."),
-        "Удалить участника": ("remove_person", "Введите имя участника для удаления."),
-        "Списки ограничений": (
-            "list_update",
-            "Введите действие в формате:\n"
-            "blocked add Имя\n"
-            "blocked remove Имя\n"
-            "single add Имя\n"
-            "only_sunday add Имя",
-        ),
-        "Лимиты": ("limit_update", "Введите лимит в формате: fri 3 или sun 5."),
-        "Доп. даты": ("extra_update", "Введите дату в формате: fri add 15.07.2026 или sun remove 19.07.2026."),
-    }
-    action, prompt = prompts[message.text]
-    pending_actions[message.from_user.id] = action
-    await message.answer(prompt)
+    year, month = get_last_month(message)
+    result = await generated_schedule(year, month)
+    await save_schedule_result(result)
+    saved = await get_saved_schedule(year, month)
+    await message.answer(
+        "График сохранён.\n\n" + format_saved_schedule(saved),
+        reply_markup=main_keyboard(True),
+    )
 
 
-@router.message(F.text == "Отмена")
+@router.message(F.text.in_({"📣 Опубликовать", "📝 Не публиковать"}))
+async def publish_button(message: Message) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    year, month = get_last_month(message)
+    status = "published" if message.text == "📣 Опубликовать" else "unpublished"
+
+    if not await set_schedule_status(year, month, status):
+        await message.answer("Сначала сохраните график.")
+        return
+
+    await show_schedule(message, year, month)
+
+
+@router.message(F.text == "✏️ Редактировать участие")
+async def edit_slot_button(message: Message) -> None:
+    await start_slot_action(message, "replace_slot")
+
+
+@router.message(F.text == "✅ Отметить участие")
+async def attendance_button(message: Message) -> None:
+    await start_slot_action(message, "attendance_slot")
+
+
+@router.message(F.text == "➕ Вне графика")
+async def extra_participant_button(message: Message) -> None:
+    await start_slot_action(message, "extra_slot")
+
+
+async def start_slot_action(message: Message, action: str) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    year, month = get_last_month(message)
+    keyboard = await slot_keyboard(year, month)
+
+    if keyboard is None:
+        await message.answer("Сначала сохраните график.")
+        return
+
+    pending_actions[message.from_user.id] = {"action": action, "year": year, "month": month}
+    await message.answer("Выберите дату:", reply_markup=keyboard)
+
+
+@router.message(F.text.in_({"➕ Добавить участника", "Добавить участника"}))
+async def add_person_button(message: Message) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    pending_actions[message.from_user.id] = {"action": "add_person"}
+    await message.answer("Введите имя участника.")
+
+
+@router.message(F.text.in_({"🗑 Удалить участника", "Удалить участника"}))
+async def remove_person_button(message: Message) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    settings = await load_settings()
+    pending_actions[message.from_user.id] = {"action": "remove_person"}
+    await message.answer("Выберите участника:", reply_markup=participants_keyboard(settings["people"]))
+
+
+@router.message(F.text.in_({"📋 Списки ограничений", "Списки ограничений"}))
+async def lists_button(message: Message) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    pending_actions[message.from_user.id] = {"action": "choose_list"}
+    await message.answer(
+        "Выберите список:",
+        reply_markup=simple_keyboard([["singleParticipation"], ["onlySunday"], ["blockedStart"], ["🚫 Отмена"]]),
+    )
+
+
+@router.message(F.text.in_({"🔢 Лимиты", "Лимиты"}))
+async def limits_button(message: Message) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    pending_actions[message.from_user.id] = {"action": "limit_update"}
+    await message.answer("Введите лимит в формате: fri 3 или sun 5.")
+
+
+@router.message(F.text.in_({"📆 Доп. даты", "Доп. даты"}))
+async def extra_dates_button(message: Message) -> None:
+    if not require_admin(message):
+        await message.answer("Нет доступа.")
+        return
+
+    pending_actions[message.from_user.id] = {"action": "extra_update"}
+    await message.answer("Введите дату в формате: fri add 15.07.2026 или sun remove 19.07.2026.")
+
+
+@router.message(F.text.in_({"🚫 Отмена", "Отмена"}))
 async def cancel_button(message: Message) -> None:
     if message.from_user:
         pending_actions.pop(message.from_user.id, None)
@@ -250,9 +362,9 @@ async def text_handler(message: Message) -> None:
     if not message.from_user:
         return
 
-    action = pending_actions.pop(message.from_user.id, None)
+    state = pending_actions.get(message.from_user.id)
 
-    if not action:
+    if not state:
         await answer_menu(message, "Выберите действие на клавиатуре или используйте /help.")
         return
 
@@ -261,17 +373,185 @@ async def text_handler(message: Message) -> None:
         return
 
     text = message.text or ""
+    action = state["action"]
 
     if action == "add_person":
+        pending_actions.pop(message.from_user.id, None)
         await add_person(message, normalise_name(text))
     elif action == "remove_person":
+        pending_actions.pop(message.from_user.id, None)
         await remove_person(message, normalise_name(text))
-    elif action == "list_update":
-        await update_list_from_text(message, text)
+    elif action in {"replace_slot", "attendance_slot", "extra_slot"}:
+        await handle_slot_selection(message, state, text)
+    elif action == "replace_people":
+        await handle_replace_people(message, state, text)
+    elif action == "attendance_person":
+        await handle_attendance_person(message, state, text)
+    elif action == "attendance_status":
+        await handle_attendance_status(message, state, text)
+    elif action == "extra_person":
+        await handle_extra_person(message, state, text)
+    elif action == "choose_list":
+        await handle_choose_list(message, text)
+    elif action == "list_action":
+        await handle_list_action(message, state, text)
+    elif action == "list_person":
+        await handle_list_person(message, state, text)
     elif action == "limit_update":
+        pending_actions.pop(message.from_user.id, None)
         await update_limit_from_text(message, text)
     elif action == "extra_update":
+        pending_actions.pop(message.from_user.id, None)
         await update_extra_from_text(message, text)
+
+
+async def handle_slot_selection(message: Message, state: dict[str, Any], text: str) -> None:
+    slot_no = parse_slot_no(text)
+
+    if slot_no is None:
+        await message.answer("Выберите дату кнопкой.")
+        return
+
+    saved = await get_saved_schedule(state["year"], state["month"])
+    slot = next((item for item in saved["slots"] if item["slot_no"] == slot_no), None) if saved else None
+
+    if slot is None:
+        await message.answer("Дата не найдена.")
+        return
+
+    settings = await load_settings()
+
+    if state["action"] == "replace_slot":
+        pending_actions[message.from_user.id] = {
+            "action": "replace_people",
+            "year": state["year"],
+            "month": state["month"],
+            "slot_no": slot_no,
+            "selected": [],
+        }
+        await message.answer(
+            "Выберите участников. Нажмите ✅ Готово, чтобы заменить список на выбранный.",
+            reply_markup=participants_keyboard(settings["people"], include_done=True),
+        )
+    elif state["action"] == "attendance_slot":
+        people = [item["name"] for item in slot["participants"]]
+        pending_actions[message.from_user.id] = {
+            "action": "attendance_person",
+            "year": state["year"],
+            "month": state["month"],
+            "slot_no": slot_no,
+        }
+        await message.answer("Выберите участника:", reply_markup=participants_keyboard(people))
+    else:
+        pending_actions[message.from_user.id] = {
+            "action": "extra_person",
+            "year": state["year"],
+            "month": state["month"],
+            "slot_no": slot_no,
+        }
+        await message.answer("Выберите участника вне графика:", reply_markup=participants_keyboard(settings["people"]))
+
+
+async def handle_replace_people(message: Message, state: dict[str, Any], text: str) -> None:
+    if text == "✅ Готово":
+        pending_actions.pop(message.from_user.id, None)
+        ok = await replace_slot_participants(
+            state["year"],
+            state["month"],
+            state["slot_no"],
+            state["selected"],
+        )
+        await message.answer("Список заменён." if ok else "Не удалось заменить список.")
+        await show_schedule(message, state["year"], state["month"])
+        return
+
+    settings = await load_settings()
+
+    if text not in settings["people"]:
+        await message.answer("Выберите участника из списка.")
+        return
+
+    if text in state["selected"]:
+        state["selected"].remove(text)
+        marker = "убран"
+    else:
+        state["selected"].append(text)
+        marker = "добавлен"
+
+    await message.answer(f"{text} {marker}. Сейчас выбрано: {', '.join(state['selected']) or 'пусто'}")
+
+
+async def handle_attendance_person(message: Message, state: dict[str, Any], text: str) -> None:
+    saved = await get_saved_schedule(state["year"], state["month"])
+    slot = next((item for item in saved["slots"] if item["slot_no"] == state["slot_no"]), None) if saved else None
+    people = [item["name"] for item in slot["participants"]] if slot else []
+
+    if text not in people:
+        await message.answer("Выберите участника из списка.")
+        return
+
+    pending_actions[message.from_user.id] = {**state, "action": "attendance_status", "name": text}
+    await message.answer("Отметьте участие:", reply_markup=simple_keyboard([["✅ Был"], ["❌ Пропустил"], ["🚫 Отмена"]]))
+
+
+async def handle_attendance_status(message: Message, state: dict[str, Any], text: str) -> None:
+    status_map = {"✅ Был": "attended", "❌ Пропустил": "missed"}
+
+    if text not in status_map:
+        await message.answer("Выберите статус кнопкой.")
+        return
+
+    pending_actions.pop(message.from_user.id, None)
+    ok = await set_slot_participant_attendance(
+        state["year"],
+        state["month"],
+        state["slot_no"],
+        state["name"],
+        status_map[text],
+    )
+    await message.answer("Участие отмечено." if ok else "Не удалось отметить участие.")
+    await show_schedule(message, state["year"], state["month"])
+
+
+async def handle_extra_person(message: Message, state: dict[str, Any], text: str) -> None:
+    settings = await load_settings()
+
+    if text not in settings["people"]:
+        await message.answer("Выберите участника из списка.")
+        return
+
+    pending_actions.pop(message.from_user.id, None)
+    ok = await add_extra_slot_participant(state["year"], state["month"], state["slot_no"], text)
+    await message.answer("Участник добавлен вне графика." if ok else "Не удалось добавить участника.")
+    await show_schedule(message, state["year"], state["month"])
+
+
+async def handle_choose_list(message: Message, text: str) -> None:
+    if text not in {"blockedStart", "singleParticipation", "onlySunday"}:
+        await message.answer("Выберите список кнопкой.")
+        return
+
+    pending_actions[message.from_user.id] = {"action": "list_action", "list_key": text}
+    await message.answer("Выберите действие:", reply_markup=simple_keyboard([["➕ Добавить"], ["➖ Убрать"], ["🚫 Отмена"]]))
+
+
+async def handle_list_action(message: Message, state: dict[str, Any], text: str) -> None:
+    if text not in {"➕ Добавить", "➖ Убрать"}:
+        await message.answer("Выберите действие кнопкой.")
+        return
+
+    settings = await load_settings()
+    pending_actions[message.from_user.id] = {
+        "action": "list_person",
+        "list_key": state["list_key"],
+        "mode": "add" if text == "➕ Добавить" else "remove",
+    }
+    await message.answer("Выберите участника:", reply_markup=participants_keyboard(settings["people"]))
+
+
+async def handle_list_person(message: Message, state: dict[str, Any], text: str) -> None:
+    pending_actions.pop(message.from_user.id, None)
+    await update_named_list(message, state["list_key"], state["mode"], normalise_name(text))
 
 
 async def add_person(message: Message, name: str) -> None:
@@ -287,7 +567,7 @@ async def add_person(message: Message, name: str) -> None:
 
     settings["people"].append(name)
     await save_settings(settings)
-    await message.answer(f"Участник добавлен: {name}")
+    await message.answer(f"Участник добавлен: {name}", reply_markup=main_keyboard(True))
 
 
 async def remove_person(message: Message, name: str) -> None:
@@ -303,33 +583,7 @@ async def remove_person(message: Message, name: str) -> None:
         settings[key] = [value for value in settings[key] if value != name]
 
     await save_settings(settings)
-    await message.answer(f"Участник удален: {name}")
-
-
-async def update_named_list_from_command(message: Message, key: str, command: str) -> None:
-    text = (message.text or "").replace(command, "", 1).strip()
-    parts = text.split(maxsplit=1)
-
-    if len(parts) != 2 or parts[0] not in {"add", "remove"}:
-        await message.answer(f"Формат: {command} add Имя или {command} remove Имя")
-        return
-
-    await update_named_list(message, key, parts[0], normalise_name(parts[1]))
-
-
-async def update_list_from_text(message: Message, text: str) -> None:
-    parts = text.split(maxsplit=2)
-    key_map = {
-        "blocked": "blockedStart",
-        "single": "singleParticipation",
-        "only_sunday": "onlySunday",
-    }
-
-    if len(parts) != 3 or parts[0] not in key_map or parts[1] not in {"add", "remove"}:
-        await message.answer("Формат: blocked add Имя, single remove Имя, only_sunday add Имя")
-        return
-
-    await update_named_list(message, key_map[parts[0]], parts[1], normalise_name(parts[2]))
+    await message.answer(f"Участник удалён: {name}", reply_markup=main_keyboard(True))
 
 
 async def update_named_list(message: Message, key: str, action: str, name: str) -> None:
@@ -340,7 +594,7 @@ async def update_named_list(message: Message, key: str, action: str, name: str) 
     settings = await load_settings()
 
     if name not in settings["people"]:
-        await message.answer("Сначала добавьте участника в общий список.")
+        await message.answer("Выберите участника из общего списка.")
         return
 
     if action == "add":
@@ -349,10 +603,10 @@ async def update_named_list(message: Message, key: str, action: str, name: str) 
         result = "добавлен"
     else:
         settings[key] = [value for value in settings[key] if value != name]
-        result = "удален"
+        result = "удалён"
 
     await save_settings(settings)
-    await message.answer(f"{name} {result} в {key}.")
+    await message.answer(f"{name} {result} в {key}.", reply_markup=main_keyboard(True))
 
 
 async def update_limit_from_text(message: Message, text: str) -> None:
@@ -371,7 +625,7 @@ async def update_limit_from_text(message: Message, text: str) -> None:
     settings = await load_settings()
     settings["limits"][parts[0]] = value
     await save_settings(settings)
-    await message.answer("Лимит обновлен.")
+    await message.answer("Лимит обновлён.", reply_markup=main_keyboard(True))
 
 
 async def update_extra_from_text(message: Message, text: str) -> None:
@@ -404,4 +658,4 @@ async def update_extra_date(message: Message, slot_type: str, action: str, value
         result = "удалена"
 
     await save_settings(settings)
-    await message.answer(f"Дата {date_value} {result}.")
+    await message.answer(f"Дата {date_value} {result}.", reply_markup=main_keyboard(True))
