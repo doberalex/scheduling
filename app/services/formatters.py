@@ -15,6 +15,10 @@ def fmt_list(values: list[str]) -> str:
     return "\n".join(f"• {value}" for value in values) if values else "пусто"
 
 
+def fmt_name_list(values: list[str]) -> str:
+    return fmt_list(sorted(values, key=str.casefold))
+
+
 def format_schedule(result: ScheduleResult) -> str:
     lines = [f"<b>Расписание на {result.month:02d}.{result.year}</b>", ""]
 
@@ -69,10 +73,10 @@ def format_settings(settings: dict) -> str:
         f"<b>Лимиты</b>\n"
         f"• Пятница: {settings['limits']['fri']}\n"
         f"• Воскресенье: {settings['limits']['sun']}\n\n"
-        f"<b>Участники</b>\n{fmt_list(settings['people'])}\n\n"
-        f"<b>blockedStart</b>\n{fmt_list(settings['blockedStart'])}\n\n"
-        f"<b>singleParticipation</b>\n{fmt_list(settings['singleParticipation'])}\n\n"
-        f"<b>onlySunday</b>\n{fmt_list(settings['onlySunday'])}\n\n"
+        f"<b>Участники</b>\n{fmt_name_list(settings['people'])}\n\n"
+        f"<b>blockedStart</b>\n{fmt_name_list(settings['blockedStart'])}\n\n"
+        f"<b>singleParticipation</b>\n{fmt_name_list(settings['singleParticipation'])}\n\n"
+        f"<b>onlySunday</b>\n{fmt_name_list(settings['onlySunday'])}\n\n"
         f"<b>Доп. пятницы</b>\n{fmt_list(settings['extraDates']['fri'])}\n\n"
         f"<b>Доп. воскресенья</b>\n{fmt_list(settings['extraDates']['sun'])}"
     )

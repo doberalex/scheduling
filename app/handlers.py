@@ -46,6 +46,10 @@ def normalise_name(value: str) -> str:
     return " ".join(value.strip().split())
 
 
+def sort_names(values: list[str]) -> list[str]:
+    return sorted(values, key=str.casefold)
+
+
 def now_month() -> tuple[int, int]:
     now = datetime.now()
     return now.year, now.month
@@ -205,7 +209,7 @@ def parse_slot_no(text: str) -> int | None:
 
 
 def participants_keyboard(people: list[str], include_done: bool = False) -> ReplyKeyboardMarkup:
-    rows = [[name] for name in people]
+    rows = [[name] for name in sort_names(people)]
 
     if include_done:
         rows.append(["✅ Готово"])
@@ -252,7 +256,7 @@ async def settings_command(message: Message) -> None:
 @router.message(Command("participants"))
 async def participants_command(message: Message) -> None:
     settings = await load_settings()
-    await message.answer("<b>Участники</b>\n" + "\n".join(f"• {name}" for name in settings["people"]))
+    await message.answer("<b>Участники</b>\n" + "\n".join(f"• {name}" for name in sort_names(settings["people"])))
 
 
 def admin_command(handler: Callable[[Message], None]) -> Callable[[Message], None]:
@@ -315,7 +319,7 @@ async def participants_menu_button(message: Message) -> None:
 async def participants_button(message: Message) -> None:
     settings = await load_settings()
     await message.answer(
-        "<b>Участники</b>\n" + "\n".join(f"• {name}" for name in settings["people"]),
+        "<b>Участники</b>\n" + "\n".join(f"• {name}" for name in sort_names(settings["people"])),
         reply_markup=participants_menu_keyboard(require_admin(message)),
     )
 
