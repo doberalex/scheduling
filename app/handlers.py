@@ -8,7 +8,12 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.config import ADMIN_IDS
-from app.keyboards.main_keyboard import main_keyboard
+from app.keyboards.main_keyboard import (
+    main_keyboard,
+    participants_menu_keyboard,
+    schedule_keyboard,
+    settings_menu_keyboard,
+)
 from app.services.formatters import format_saved_schedule, format_schedule, format_settings
 from app.services.scheduler import generate, parse_date
 from app.services.settings_store import (
@@ -70,6 +75,18 @@ async def answer_menu(message: Message, text: str) -> None:
     await message.answer(text, reply_markup=main_keyboard(is_admin(user_id)))
 
 
+async def answer_schedule_menu(message: Message, text: str) -> None:
+    await message.answer(text, reply_markup=schedule_keyboard(require_admin(message)))
+
+
+async def answer_participants_menu(message: Message, text: str) -> None:
+    await message.answer(text, reply_markup=participants_menu_keyboard(require_admin(message)))
+
+
+async def answer_settings_menu(message: Message, text: str) -> None:
+    await message.answer(text, reply_markup=settings_menu_keyboard(require_admin(message)))
+
+
 def parse_month_args(text: str) -> tuple[int, int]:
     parts = text.split()
 
@@ -108,11 +125,11 @@ async def show_schedule(message: Message, year: int | None = None, month: int | 
     saved = await get_saved_schedule(year, month)
 
     if saved:
-        await message.answer(format_saved_schedule(saved), reply_markup=main_keyboard(require_admin(message)))
+        await message.answer(format_saved_schedule(saved), reply_markup=schedule_keyboard(require_admin(message)))
         return
 
     result = await generated_schedule(year, month)
-    await message.answer(format_schedule(result), reply_markup=main_keyboard(require_admin(message)))
+    await message.answer(format_schedule(result), reply_markup=schedule_keyboard(require_admin(message)))
 
 
 async def slot_keyboard(year: int, month: int) -> ReplyKeyboardMarkup | None:
@@ -148,7 +165,7 @@ async def start_handler(message: Message) -> None:
     await answer_menu(
         message,
         "Бот управления расписаниями готов.\n\n"
-        "Основные действия доступны на кнопках.",
+        "Выберите раздел на клавиатуре.",
     )
 
 
@@ -157,12 +174,10 @@ async def help_handler(message: Message) -> None:
     await answer_menu(
         message,
         "<b>Управление</b>\n\n"
-        "📅 График — показать сохранённый или расчётный график.\n"
-        "💾 Сохранить график — сохранить график месяца в БД.\n"
-        "✏️ Редактировать участие — заменить список участников выбранной даты.\n"
-        "✅ Отметить участие — отметить был/пропустил.\n"
-        "➕ Вне графика — добавить участника не по графику.\n"
-        "📣 Опубликовать / 📝 Не публиковать — статус графика.",
+        "📅 График — просмотр, сохранение, публикация и отметки участия.\n"
+        "👥 Участники — список, добавление и удаление.\n"
+        "⚙️ Настройки — ограничения, лимиты и дополнительные даты.\n"
+        "🏠 Главное меню — выход из любого раздела.",
     )
 
 
@@ -211,20 +226,33 @@ async def remove_name_command(message: Message) -> None:
     await remove_person(message, name)
 
 
-@router.message(F.text.in_({"📅 График", "Расписание"}))
+@router.message(F.text.in_({"📅 График", "Расписание", "📆 Показать график"}))
 async def schedule_button(message: Message) -> None:
     await show_schedule(message)
 
 
 @router.message(F.text.in_({"⚙️ Настройки", "Настройки"}))
+async def settings_menu_button(message: Message) -> None:
+    await answer_settings_menu(message, "Раздел настроек.")
+
+
+@router.message(F.text.in_({"📋 Показать настройки"}))
 async def settings_button(message: Message) -> None:
-    await message.answer(format_settings(await load_settings()))
+    await message.answer(format_settings(await load_settings()), reply_markup=settings_menu_keyboard(require_admin(message)))
 
 
 @router.message(F.text.in_({"👥 Участники", "Участники"}))
+async def participants_menu_button(message: Message) -> None:
+    await answer_participants_menu(message, "Раздел участников.")
+
+
+@router.message(F.text.in_({"📋 Список участников"}))
 async def participants_button(message: Message) -> None:
     settings = await load_settings()
-    await message.answer("<b>Участники</b>\n" + "\n".join(f"• {name}" for name in settings["people"]))
+    await message.answer(
+        "<b>Участники</b>\n" + "\n".join(f"• {name}" for name in settings["people"]),
+        reply_markup=participants_menu_keyboard(require_admin(message)),
+    )
 
 
 @router.message(F.text.in_({"❓ Помощь", "Помощь"}))
@@ -244,7 +272,7 @@ async def save_schedule_button(message: Message) -> None:
     saved = await get_saved_schedule(year, month)
     await message.answer(
         "График сохранён.\n\n" + format_saved_schedule(saved),
-        reply_markup=main_keyboard(True),
+        reply_markup=schedule_keyboard(True),
     )
 
 
@@ -302,7 +330,7 @@ async def add_person_button(message: Message) -> None:
         return
 
     pending_actions[message.from_user.id] = {"action": "add_person"}
-    await message.answer("Введите имя участника.")
+    await message.answer("Введите имя участника.", reply_markup=simple_keyboard([["🚫 Отмена"], ["🏠 Главное меню"]]))
 
 
 @router.message(F.text.in_({"🗑 Удалить участника", "Удалить участника"}))
@@ -336,7 +364,10 @@ async def limits_button(message: Message) -> None:
         return
 
     pending_actions[message.from_user.id] = {"action": "limit_update"}
-    await message.answer("Введите лимит в формате: fri 3 или sun 5.")
+    await message.answer(
+        "Введите лимит в формате: fri 3 или sun 5.",
+        reply_markup=simple_keyboard([["🚫 Отмена"], ["🏠 Главное меню"]]),
+    )
 
 
 @router.message(F.text.in_({"📆 Доп. даты", "Доп. даты"}))
@@ -346,7 +377,10 @@ async def extra_dates_button(message: Message) -> None:
         return
 
     pending_actions[message.from_user.id] = {"action": "extra_update"}
-    await message.answer("Введите дату в формате: fri add 15.07.2026 или sun remove 19.07.2026.")
+    await message.answer(
+        "Введите дату в формате: fri add 15.07.2026 или sun remove 19.07.2026.",
+        reply_markup=simple_keyboard([["🚫 Отмена"], ["🏠 Главное меню"]]),
+    )
 
 
 @router.message(F.text.in_({"🚫 Отмена", "Отмена"}))
@@ -355,6 +389,14 @@ async def cancel_button(message: Message) -> None:
         pending_actions.pop(message.from_user.id, None)
 
     await answer_menu(message, "Действие отменено.")
+
+
+@router.message(F.text.in_({"🏠 Главное меню", "Главное меню"}))
+async def main_menu_button(message: Message) -> None:
+    if message.from_user:
+        pending_actions.pop(message.from_user.id, None)
+
+    await answer_menu(message, "Главное меню.")
 
 
 @router.message()
@@ -567,7 +609,7 @@ async def add_person(message: Message, name: str) -> None:
 
     settings["people"].append(name)
     await save_settings(settings)
-    await message.answer(f"Участник добавлен: {name}", reply_markup=main_keyboard(True))
+    await message.answer(f"Участник добавлен: {name}", reply_markup=participants_menu_keyboard(True))
 
 
 async def remove_person(message: Message, name: str) -> None:
@@ -583,7 +625,7 @@ async def remove_person(message: Message, name: str) -> None:
         settings[key] = [value for value in settings[key] if value != name]
 
     await save_settings(settings)
-    await message.answer(f"Участник удалён: {name}", reply_markup=main_keyboard(True))
+    await message.answer(f"Участник удалён: {name}", reply_markup=participants_menu_keyboard(True))
 
 
 async def update_named_list(message: Message, key: str, action: str, name: str) -> None:
@@ -606,7 +648,7 @@ async def update_named_list(message: Message, key: str, action: str, name: str) 
         result = "удалён"
 
     await save_settings(settings)
-    await message.answer(f"{name} {result} в {key}.", reply_markup=main_keyboard(True))
+    await message.answer(f"{name} {result} в {key}.", reply_markup=settings_menu_keyboard(True))
 
 
 async def update_limit_from_text(message: Message, text: str) -> None:
@@ -625,7 +667,7 @@ async def update_limit_from_text(message: Message, text: str) -> None:
     settings = await load_settings()
     settings["limits"][parts[0]] = value
     await save_settings(settings)
-    await message.answer("Лимит обновлён.", reply_markup=main_keyboard(True))
+    await message.answer("Лимит обновлён.", reply_markup=settings_menu_keyboard(True))
 
 
 async def update_extra_from_text(message: Message, text: str) -> None:
@@ -658,4 +700,4 @@ async def update_extra_date(message: Message, slot_type: str, action: str, value
         result = "удалена"
 
     await save_settings(settings)
-    await message.answer(f"Дата {date_value} {result}.", reply_markup=main_keyboard(True))
+    await message.answer(f"Дата {date_value} {result}.", reply_markup=settings_menu_keyboard(True))

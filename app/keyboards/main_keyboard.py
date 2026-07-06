@@ -1,6 +1,13 @@
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 
+def _keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=value) for value in row] for row in rows],
+        resize_keyboard=True,
+    )
+
+
 def main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
     keyboard = [
         [
@@ -13,34 +20,55 @@ def main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
         ],
     ]
 
-    if is_admin:
-        keyboard.extend(
-            [
-                [
-                    KeyboardButton(text="💾 Сохранить график"),
-                    KeyboardButton(text="✏️ Редактировать участие"),
-                ],
-                [
-                    KeyboardButton(text="✅ Отметить участие"),
-                    KeyboardButton(text="➕ Вне графика"),
-                ],
-                [
-                    KeyboardButton(text="📣 Опубликовать"),
-                    KeyboardButton(text="📝 Не публиковать"),
-                ],
-                [
-                    KeyboardButton(text="➕ Добавить участника"),
-                    KeyboardButton(text="🗑 Удалить участника"),
-                ],
-                [
-                    KeyboardButton(text="📋 Списки ограничений"),
-                    KeyboardButton(text="🔢 Лимиты"),
-                ],
-                [
-                    KeyboardButton(text="📆 Доп. даты"),
-                    KeyboardButton(text="🚫 Отмена"),
-                ],
-            ]
-        )
-
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def schedule_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
+    rows = [
+        ["📆 Показать график"],
+        ["🏠 Главное меню"],
+    ]
+
+    if is_admin:
+        rows = [
+            ["📆 Показать график", "💾 Сохранить график"],
+            ["✏️ Редактировать участие", "✅ Отметить участие"],
+            ["➕ Вне графика"],
+            ["📣 Опубликовать", "📝 Не публиковать"],
+            ["🏠 Главное меню"],
+        ]
+
+    return _keyboard(rows)
+
+
+def participants_menu_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
+    rows = [
+        ["📋 Список участников"],
+        ["🏠 Главное меню"],
+    ]
+
+    if is_admin:
+        rows = [
+            ["📋 Список участников"],
+            ["➕ Добавить участника", "🗑 Удалить участника"],
+            ["🏠 Главное меню"],
+        ]
+
+    return _keyboard(rows)
+
+
+def settings_menu_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
+    rows = [
+        ["📋 Показать настройки"],
+        ["🏠 Главное меню"],
+    ]
+
+    if is_admin:
+        rows = [
+            ["📋 Показать настройки"],
+            ["📋 Списки ограничений", "🔢 Лимиты"],
+            ["📆 Доп. даты"],
+            ["🏠 Главное меню"],
+        ]
+
+    return _keyboard(rows)
