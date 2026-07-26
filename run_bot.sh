@@ -7,7 +7,7 @@ if [ ! -x "$PYTHON_BIN" ] || ! "$PYTHON_BIN" -c "import aiogram" >/dev/null 2>&1
     PYTHON_BIN="python3"
 fi
 
-if ! pgrep -f "$PROJECT_DIR/run.py" > /dev/null
+if ! pgrep -f "^[^ ]*python[0-9.]* $PROJECT_DIR/run.py$" > /dev/null
 then
     cd "$PROJECT_DIR" || exit 1
     nohup "$PYTHON_BIN" "$PROJECT_DIR/run.py" > "$PROJECT_DIR/bot.log" 2>&1 &
