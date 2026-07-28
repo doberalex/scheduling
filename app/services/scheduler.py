@@ -3,11 +3,17 @@ from __future__ import annotations
 import zlib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from time import monotonic
 from typing import Any
 
 
 SLOT_TYPES = {"fri", "sun"}
 SLOT_LABELS = {"fri": "пятница", "sun": "воскресенье"}
+SEARCH_TIMEOUT_SECONDS = 15.0
+
+
+class ScheduleSearchTimeout(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -256,7 +262,11 @@ def solve_by_person_options(
     remaining: dict[int, int],
     person_slots: dict[str, list[int]],
     index: int = 0,
+    deadline: float | None = None,
 ) -> bool:
+    if deadline is not None and monotonic() > deadline:
+        raise ScheduleSearchTimeout()
+
     if index >= len(people):
         return remaining_total(remaining) == 0
 
@@ -277,6 +287,7 @@ def solve_by_person_options(
             subtract_option_from_remaining(option, remaining),
             person_slots,
             index + 1,
+            deadline,
         ):
             return True
 
@@ -311,6 +322,7 @@ def try_build_schedule_by_person_options(
     only_sunday: list[str],
     seed: int,
     previous_participation_counts: dict[str, int] | None = None,
+    deadline: float | None = None,
 ) -> tuple[bool, dict[int, list[str]], dict[str, list[int]]]:
     previous_participation_counts = previous_participation_counts or {}
     options_by_person = {}
@@ -341,7 +353,7 @@ def try_build_schedule_by_person_options(
     )
     person_slots = create_empty_person_slots(people)
 
-    if not solve_by_person_options(ordered_people, options_by_person, slot_limits, person_slots):
+    if not solve_by_person_options(ordered_people, options_by_person, slot_limits, person_slots, deadline=deadline):
         return False, create_empty_schedule(slots), create_empty_person_slots(people)
 
     return True, build_schedule_from_person_slots(person_slots, slots), person_slots
@@ -383,6 +395,26 @@ def can_assign_with_slot_limits(
 
 def compare_candidates(person: str, person_slots: dict[str, list[int]]) -> tuple[int, str]:
     return len(person_slots.get(person, [])), person
+
+
+def compare_balanced_candidates(
+    person: str,
+    person_slots: dict[str, list[int]],
+    previous_participation_counts: dict[str, int],
+) -> tuple[int, int, str]:
+    current_count = len(person_slots.get(person, []))
+    previous_count = previous_participation_counts.get(person, 0)
+
+    if previous_count >= 3:
+        target = 2
+    elif previous_count == 2:
+        target = 3
+    else:
+        target = 3
+
+    over_target = 1 if current_count >= target else 0
+
+    return over_target, current_count, person
 
 
 def find_next_slot(
@@ -431,6 +463,69 @@ def find_next_slot(
     return best_slot_id, best_candidates
 
 
+def build_greedy_schedule(
+    people: list[str],
+    slots: dict[int, str],
+    slot_limits: dict[int, int],
+    blocked_start: list[str],
+    single_participation: list[str],
+    only_sunday: list[str],
+    previous_participation_counts: dict[str, int] | None = None,
+) -> tuple[dict[int, list[str]], dict[str, list[int]]]:
+    previous_participation_counts = previous_participation_counts or {}
+    schedule = create_empty_schedule(slots)
+    person_slots = create_empty_person_slots(people)
+    skipped_slots: set[int] = set()
+
+    while True:
+        best_slot_id = None
+        best_candidates: list[str] = []
+
+        for slot_id in slots:
+            if slot_id in skipped_slots or len(schedule[slot_id]) >= slot_limits[slot_id]:
+                continue
+
+            candidates = sorted(
+                [
+                    person
+                    for person in people
+                    if can_assign_with_slot_limits(
+                        person,
+                        slot_id,
+                        person_slots,
+                        slots,
+                        schedule,
+                        slot_limits,
+                        blocked_start,
+                        single_participation,
+                        only_sunday,
+                    )
+                ],
+                key=lambda person: compare_balanced_candidates(
+                    person,
+                    person_slots,
+                    previous_participation_counts,
+                ),
+            )
+
+            if not candidates:
+                skipped_slots.add(slot_id)
+                continue
+
+            if best_slot_id is None or len(candidates) < len(best_candidates):
+                best_slot_id = slot_id
+                best_candidates = candidates
+
+        if best_slot_id is None:
+            break
+
+        person = best_candidates[0]
+        schedule[best_slot_id].append(person)
+        person_slots[person].append(best_slot_id)
+
+    return schedule, person_slots
+
+
 def schedule_types_are_possible(
     person_slots: dict[str, list[int]],
     people: list[str],
@@ -476,7 +571,11 @@ def fill_schedule_recursive(
     blocked_start: list[str],
     single_participation: list[str],
     only_sunday: list[str],
+    deadline: float | None = None,
 ) -> bool:
+    if deadline is not None and monotonic() > deadline:
+        raise ScheduleSearchTimeout()
+
     slot_id, candidates = find_next_slot(
         schedule,
         person_slots,
@@ -500,7 +599,7 @@ def fill_schedule_recursive(
 
         if (
             schedule_types_are_possible(person_slots, people, slots, single_participation, only_sunday)
-            and fill_schedule_recursive(schedule, person_slots, people, slots, slot_limits, blocked_start, single_participation, only_sunday)
+            and fill_schedule_recursive(schedule, person_slots, people, slots, slot_limits, blocked_start, single_participation, only_sunday, deadline)
         ):
             return True
 
@@ -522,6 +621,7 @@ def build_schedule(
 ) -> tuple[dict[int, list[str]], dict[str, list[int]], dict[int, int]]:
     base_slot_limits = get_base_slot_limits(slots, limits)
     variants = [base_slot_limits]
+    deadline = monotonic() + SEARCH_TIMEOUT_SECONDS
 
     for slot_id, value in base_slot_limits.items():
         if value <= 0:
@@ -532,36 +632,53 @@ def build_schedule(
         variants.append(variant)
 
     for slot_limits in variants:
-        success, schedule, person_slots = try_build_schedule_by_person_options(
-            people,
-            slots,
-            slot_limits,
-            blocked_start,
-            single_participation,
-            only_sunday,
-            seed,
-            previous_participation_counts,
-        )
+        if monotonic() > deadline:
+            break
 
-        if success:
-            return schedule, person_slots, slot_limits
+        try:
+            success, schedule, person_slots = try_build_schedule_by_person_options(
+                people,
+                slots,
+                slot_limits,
+                blocked_start,
+                single_participation,
+                only_sunday,
+                seed,
+                previous_participation_counts,
+                deadline,
+            )
 
-        schedule = create_empty_schedule(slots)
-        person_slots = create_empty_person_slots(people)
+            if success:
+                return schedule, person_slots, slot_limits
 
-        if fill_schedule_recursive(
-            schedule,
-            person_slots,
-            people,
-            slots,
-            slot_limits,
-            blocked_start,
-            single_participation,
-            only_sunday,
-        ):
-            return schedule, person_slots, slot_limits
+            schedule = create_empty_schedule(slots)
+            person_slots = create_empty_person_slots(people)
 
-    return create_empty_schedule(slots), create_empty_person_slots(people), base_slot_limits
+            if fill_schedule_recursive(
+                schedule,
+                person_slots,
+                people,
+                slots,
+                slot_limits,
+                blocked_start,
+                single_participation,
+                only_sunday,
+                deadline,
+            ):
+                return schedule, person_slots, slot_limits
+        except ScheduleSearchTimeout:
+            break
+
+    schedule, person_slots = build_greedy_schedule(
+        people,
+        slots,
+        base_slot_limits,
+        blocked_start,
+        single_participation,
+        only_sunday,
+        previous_participation_counts,
+    )
+    return schedule, person_slots, base_slot_limits
 
 
 def validate_schedule(
