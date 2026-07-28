@@ -773,6 +773,32 @@ async def previous_month_blocked_start(year: int, month: int) -> list[str]:
     return list(dict.fromkeys(blocked))
 
 
+async def previous_month_participation_counts(year: int, month: int) -> dict[str, int]:
+    previous_year = year
+    previous_month = month - 1
+
+    if previous_month == 0:
+        previous_month = 12
+        previous_year -= 1
+
+    saved = await get_saved_schedule(previous_year, previous_month)
+
+    if not saved:
+        return {}
+
+    counts: dict[str, int] = {}
+
+    for slot in saved["slots"]:
+        for participant in slot["participants"]:
+            if not participant["is_scheduled"]:
+                continue
+
+            name = participant["name"]
+            counts[name] = counts.get(name, 0) + 1
+
+    return counts
+
+
 async def init_db_if_needed() -> None:
     db_pool = await connect_db()
 

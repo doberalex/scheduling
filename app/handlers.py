@@ -21,6 +21,7 @@ from app.services.settings_store import (
     get_saved_schedule,
     load_settings,
     previous_month_blocked_start,
+    previous_month_participation_counts,
     replace_slot_participants,
     save_schedule_result,
     save_settings,
@@ -134,9 +135,12 @@ def parse_month_args(text: str) -> tuple[int, int]:
 async def settings_for_month(year: int, month: int) -> dict:
     settings = await load_settings()
     auto_blocked = await previous_month_blocked_start(year, month)
+    previous_counts = await previous_month_participation_counts(year, month)
 
     if auto_blocked:
         settings["blockedStart"] = auto_blocked
+
+    settings["previousParticipationCounts"] = previous_counts
 
     return settings
 
@@ -216,6 +220,27 @@ def participants_keyboard(people: list[str], include_done: bool = False) -> Repl
 
     rows.append(["🚫 Отмена"])
     return simple_keyboard(rows)
+
+
+def limit_type_keyboard() -> ReplyKeyboardMarkup:
+    return simple_keyboard(
+        [
+            ["🍞 Пятница", "☀️ Воскресенье"],
+            ["🚫 Отмена"],
+            ["🏠 Главное меню"],
+        ]
+    )
+
+
+def limit_value_keyboard() -> ReplyKeyboardMarkup:
+    return simple_keyboard(
+        [
+            ["1", "2", "3"],
+            ["4", "5", "6"],
+            ["🚫 Отмена"],
+            ["🏠 Главное меню"],
+        ]
+    )
 
 
 @router.message(CommandStart())
@@ -463,10 +488,14 @@ async def limits_button(message: Message) -> None:
         await message.answer("Нет доступа.")
         return
 
-    pending_actions[message.from_user.id] = {"action": "limit_update"}
+    settings = await load_settings()
+    pending_actions[message.from_user.id] = {"action": "limit_type"}
     await message.answer(
-        "Введите лимит в формате: fri 3 или sun 5.",
-        reply_markup=simple_keyboard([["🚫 Отмена"], ["🏠 Главное меню"]]),
+        "<b>Текущие лимиты</b>\n"
+        f"🍞 Пятница: {settings['limits']['fri']}\n"
+        f"☀️ Воскресенье: {settings['limits']['sun']}\n\n"
+        "Что изменить?",
+        reply_markup=limit_type_keyboard(),
     )
 
 
@@ -541,6 +570,10 @@ async def text_handler(message: Message) -> None:
         await handle_list_action(message, state, text)
     elif action == "list_person":
         await handle_list_person(message, state, text)
+    elif action == "limit_type":
+        await handle_limit_type(message, text)
+    elif action == "limit_value":
+        await handle_limit_value(message, state, text)
     elif action == "limit_update":
         pending_actions.pop(message.from_user.id, None)
         await update_limit_from_text(message, text)
@@ -742,6 +775,42 @@ async def handle_list_action(message: Message, state: dict[str, Any], text: str)
 async def handle_list_person(message: Message, state: dict[str, Any], text: str) -> None:
     pending_actions.pop(message.from_user.id, None)
     await update_named_list(message, state["list_key"], state["mode"], normalise_name(text))
+
+
+async def handle_limit_type(message: Message, text: str) -> None:
+    limit_keys = {
+        "🍞 Пятница": "fri",
+        "☀️ Воскресенье": "sun",
+        "Пятница": "fri",
+        "Воскресенье": "sun",
+    }
+
+    if text not in limit_keys:
+        await message.answer("Выберите день кнопкой.", reply_markup=limit_type_keyboard())
+        return
+
+    pending_actions[message.from_user.id] = {"action": "limit_value", "slot_type": limit_keys[text]}
+    await message.answer("Выберите новый лимит:", reply_markup=limit_value_keyboard())
+
+
+async def handle_limit_value(message: Message, state: dict[str, Any], text: str) -> None:
+    try:
+        value = int(text)
+    except ValueError:
+        await message.answer("Выберите число кнопкой.", reply_markup=limit_value_keyboard())
+        return
+
+    if value < 1 or value > 10:
+        await message.answer("Лимит должен быть от 1 до 10.", reply_markup=limit_value_keyboard())
+        return
+
+    pending_actions.pop(message.from_user.id, None)
+    settings = await load_settings()
+    slot_type = state["slot_type"]
+    settings["limits"][slot_type] = value
+    await save_settings(settings)
+    label = "Пятница" if slot_type == "fri" else "Воскресенье"
+    await message.answer(f"Лимит обновлён: {label} — {value}.", reply_markup=settings_menu_keyboard(True))
 
 
 async def add_person(message: Message, name: str) -> None:

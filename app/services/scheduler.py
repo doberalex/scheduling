@@ -166,10 +166,12 @@ def get_person_options(
     single_participation: list[str],
     only_sunday: list[str],
     seed: int,
+    previous_participation_counts: dict[str, int] | None = None,
 ) -> list[list[int]]:
     max_count = get_max_participation(person, single_participation)
     allowed_slots = get_allowed_slots_for_person(person, slots, blocked_start, only_sunday)
     options = []
+    previous_count = (previous_participation_counts or {}).get(person, 0)
 
     for combination in generate_slot_combinations(allowed_slots, max_count):
         count = len(combination)
@@ -190,10 +192,28 @@ def get_person_options(
     return sorted(
         options,
         key=lambda option: (
-            -len(option),
+            participation_count_priority(person, len(option), previous_count, single_participation),
             seeded_rank(f"{person}:{','.join(map(str, option))}", seed),
         ),
     )
+
+
+def participation_count_priority(
+    person: str,
+    count: int,
+    previous_count: int,
+    single_participation: list[str],
+) -> tuple[int, int]:
+    if person in single_participation:
+        return 0, 0
+
+    if previous_count >= 3:
+        return abs(count - 2), -count
+
+    if previous_count == 2:
+        return abs(count - 3), -count
+
+    return -count, 0
 
 
 def option_fits_remaining(option: list[int], remaining: dict[int, int]) -> bool:
@@ -265,6 +285,13 @@ def solve_by_person_options(
     return False
 
 
+def person_order_priority(person: str, options: list[list[int]], previous_participation_counts: dict[str, int]) -> tuple[int, int, str]:
+    previous_count = previous_participation_counts.get(person, 0)
+    max_option_len = max((len(option) for option in options), default=0)
+
+    return previous_count, -max_option_len, person
+
+
 def build_schedule_from_person_slots(person_slots: dict[str, list[int]], slots: dict[int, str]) -> dict[int, list[str]]:
     schedule = create_empty_schedule(slots)
 
@@ -283,11 +310,21 @@ def try_build_schedule_by_person_options(
     single_participation: list[str],
     only_sunday: list[str],
     seed: int,
+    previous_participation_counts: dict[str, int] | None = None,
 ) -> tuple[bool, dict[int, list[str]], dict[str, list[int]]]:
+    previous_participation_counts = previous_participation_counts or {}
     options_by_person = {}
 
     for person in people:
-        options = get_person_options(person, slots, blocked_start, single_participation, only_sunday, seed)
+        options = get_person_options(
+            person,
+            slots,
+            blocked_start,
+            single_participation,
+            only_sunday,
+            seed,
+            previous_participation_counts,
+        )
 
         if not options:
             return False, create_empty_schedule(slots), create_empty_person_slots(people)
@@ -296,7 +333,11 @@ def try_build_schedule_by_person_options(
 
     ordered_people = sorted(
         people,
-        key=lambda person: (len(options_by_person[person]), seeded_rank(person, seed)),
+        key=lambda person: (
+            len(options_by_person[person]),
+            person_order_priority(person, options_by_person[person], previous_participation_counts),
+            seeded_rank(person, seed),
+        ),
     )
     person_slots = create_empty_person_slots(people)
 
@@ -477,6 +518,7 @@ def build_schedule(
     single_participation: list[str],
     only_sunday: list[str],
     seed: int,
+    previous_participation_counts: dict[str, int] | None = None,
 ) -> tuple[dict[int, list[str]], dict[str, list[int]], dict[int, int]]:
     base_slot_limits = get_base_slot_limits(slots, limits)
     variants = [base_slot_limits]
@@ -498,6 +540,7 @@ def build_schedule(
             single_participation,
             only_sunday,
             seed,
+            previous_participation_counts,
         )
 
         if success:
@@ -606,6 +649,7 @@ def generate(settings: dict[str, Any], year: int, month: int) -> ScheduleResult:
         settings["singleParticipation"],
         settings["onlySunday"],
         seed,
+        settings.get("previousParticipationCounts", {}),
     )
     errors = validate_schedule(
         schedule,
@@ -637,4 +681,3 @@ def generate(settings: dict[str, Any], year: int, month: int) -> ScheduleResult:
         resolved_slot_limits=resolved_slot_limits,
         errors=errors,
     )
-
