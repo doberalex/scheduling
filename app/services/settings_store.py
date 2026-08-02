@@ -65,7 +65,7 @@ LIST_KEYS = {
 }
 SLOT_TYPES = {"fri", "sun"}
 SCHEDULE_STATUSES = {"published", "unpublished"}
-ATTENDANCE_STATUSES = {"planned", "attended", "missed"}
+ATTENDANCE_STATUSES = {"planned", "attended", "missed", "reserve"}
 
 pool: aiomysql.Pool | None = None
 

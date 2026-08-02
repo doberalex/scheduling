@@ -733,11 +733,14 @@ async def handle_attendance_person(message: Message, state: dict[str, Any], text
         return
 
     pending_actions[message.from_user.id] = {**state, "action": "attendance_status", "name": text}
-    await message.answer("Отметьте участие:", reply_markup=simple_keyboard([["✅ Был"], ["❌ Пропустил"], ["🚫 Отмена"]]))
+    await message.answer(
+        "Отметьте участие:",
+        reply_markup=simple_keyboard([["✅ Был"], ["❌ Пропустил"], ["🟡 Запас"], ["🚫 Отмена"]]),
+    )
 
 
 async def handle_attendance_status(message: Message, state: dict[str, Any], text: str) -> None:
-    status_map = {"✅ Был": "attended", "❌ Пропустил": "missed"}
+    status_map = {"✅ Был": "attended", "❌ Пропустил": "missed", "🟡 Запас": "reserve"}
 
     if text not in status_map:
         await message.answer("Выберите статус кнопкой.")

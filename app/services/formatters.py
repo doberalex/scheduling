@@ -8,6 +8,7 @@ ATTENDANCE_LABELS = {
     "planned": "📌",
     "attended": "✅",
     "missed": "❌",
+    "reserve": "🟡",
 }
 
 
