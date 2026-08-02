@@ -63,6 +63,13 @@ def next_month(year: int, month: int) -> tuple[int, int]:
     return year, month + 1
 
 
+def previous_month(year: int, month: int) -> tuple[int, int]:
+    if month == 1:
+        return year - 1, 12
+
+    return year, month - 1
+
+
 def month_label(year: int, month: int) -> str:
     return f"{month:02d}.{year}"
 
@@ -88,9 +95,11 @@ def simple_keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
 
 def month_choice_keyboard() -> ReplyKeyboardMarkup:
     current_year, current_month = now_month()
+    previous_year, previous_month_value = previous_month(current_year, current_month)
     next_year, next_month_value = next_month(current_year, current_month)
     return simple_keyboard(
         [
+            [f"⬅️ Прошлый месяц {month_label(previous_year, previous_month_value)}"],
             [f"📍 Текущий месяц {month_label(current_year, current_month)}"],
             [f"➡️ Следующий месяц {month_label(next_year, next_month_value)}"],
             ["🚫 Отмена"],
@@ -184,6 +193,10 @@ async def ask_month(message: Message, action: str, prompt: str = "Выберит
 
 
 def parse_month_choice(text: str) -> tuple[int, int] | None:
+    if text.startswith("⬅️ Прошлый месяц"):
+        current_year, current_month = now_month()
+        return previous_month(current_year, current_month)
+
     if text.startswith("📍 Текущий месяц"):
         return now_month()
 
@@ -322,6 +335,12 @@ async def schedule_button(message: Message) -> None:
 @router.message(F.text == "➡️ Следующий месяц")
 async def next_month_button(message: Message) -> None:
     year, month = next_month(*now_month())
+    await show_schedule(message, year, month)
+
+
+@router.message(F.text == "⬅️ Прошлый месяц")
+async def previous_month_button(message: Message) -> None:
+    year, month = previous_month(*now_month())
     await show_schedule(message, year, month)
 
 
