@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "").strip()
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow").strip()
 DB_HOST = os.getenv("DB_HOST", "localhost").strip()
 DB_PORT = int(os.getenv("DB_PORT", "3306").strip())

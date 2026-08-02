@@ -6,7 +6,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiohttp.resolver import DefaultResolver
 
-from app.config import BOT_TOKEN
+from app.config import BOT_TOKEN, TELEGRAM_PROXY_URL
 from app.handlers import router
 from app.services.settings_store import close_db, init_db
 
@@ -46,9 +46,11 @@ async def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is empty. Create .env from .env.example.")
 
-    session = AiohttpSession()
+    session = AiohttpSession(proxy=TELEGRAM_PROXY_URL or None)
     session._connector_init["family"] = socket.AF_INET
-    session._connector_init["resolver"] = TelegramIPv4Resolver()
+
+    if not TELEGRAM_PROXY_URL:
+        session._connector_init["resolver"] = TelegramIPv4Resolver()
 
     bot = Bot(
         token=BOT_TOKEN,
