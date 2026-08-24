@@ -51,6 +51,14 @@ def sort_names(values: list[str]) -> list[str]:
     return sorted(values, key=str.casefold)
 
 
+def is_guest_name(value: str) -> bool:
+    return normalise_name(value).casefold().startswith("гость")
+
+
+def schedule_people(values: list[str]) -> list[str]:
+    return [name for name in values if not is_guest_name(name)]
+
+
 def now_month() -> tuple[int, int]:
     now = datetime.now()
     return now.year, now.month
@@ -156,6 +164,7 @@ async def settings_for_month(year: int, month: int) -> dict:
 
 async def generated_schedule(year: int, month: int):
     settings = await settings_for_month(year, month)
+    settings = {**settings, "people": schedule_people(settings["people"])}
     return generate(settings, year, month)
 
 
@@ -664,6 +673,7 @@ async def handle_slot_selection(message: Message, state: dict[str, Any], text: s
     settings = await load_settings()
 
     if state["action"] == "replace_slot":
+        planned_people = schedule_people(settings["people"])
         pending_actions[message.from_user.id] = {
             "action": "replace_people",
             "year": state["year"],
@@ -673,7 +683,7 @@ async def handle_slot_selection(message: Message, state: dict[str, Any], text: s
         }
         await message.answer(
             "Выберите участников. Нажмите ✅ Готово, чтобы заменить список на выбранный.",
-            reply_markup=participants_keyboard(settings["people"], include_done=True),
+            reply_markup=participants_keyboard(planned_people, include_done=True),
         )
     elif state["action"] == "attendance_slot":
         people = [item["name"] for item in slot["participants"]]
@@ -708,8 +718,9 @@ async def handle_replace_people(message: Message, state: dict[str, Any], text: s
         return
 
     settings = await load_settings()
+    planned_people = schedule_people(settings["people"])
 
-    if text not in settings["people"]:
+    if text not in planned_people:
         await message.answer("Выберите участника из списка.")
         return
 
