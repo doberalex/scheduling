@@ -34,6 +34,8 @@ DB_PASSWORD=database_password
 DB_NAME=doberalex_tbotschedule
 ```
 
+Бот закрыт для посторонних: все команды и кнопки доступны только пользователям из `ADMIN_IDS` или `ADMIN_ID`; остальные получают предупреждение.
+
 Все рабочие данные хранятся в MySQL. Бот сам создаёт таблицы при первом запуске:
 
 - `schedule_participants`

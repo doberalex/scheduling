@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
-from aiogram import F, Router
+from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
@@ -42,6 +42,29 @@ def is_admin(user_id: int) -> bool:
 
 def require_admin(message: Message) -> bool:
     return bool(message.from_user and is_admin(message.from_user.id))
+
+
+class AdminOnlyMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[Message, dict[str, Any]], Awaitable[Any]],
+        event: Message,
+        data: dict[str, Any],
+    ) -> Any:
+        if not require_admin(event):
+            if event.from_user:
+                pending_actions.pop(event.from_user.id, None)
+
+            await event.answer(
+                "Доступ к этому боту закрыт. "
+                "Бот предназначен только для администратора расписаний."
+            )
+            return None
+
+        return await handler(event, data)
+
+
+router.message.middleware(AdminOnlyMiddleware())
 
 
 def normalise_name(value: str) -> str:

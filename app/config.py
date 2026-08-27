@@ -34,4 +34,6 @@ def parse_admin_ids(value: str) -> set[int]:
     return ids
 
 
-ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", ""))
+ADMIN_IDS = parse_admin_ids(
+    os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", "62602216"))
+)
