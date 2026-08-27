@@ -15,7 +15,7 @@ from app.keyboards.main_keyboard import (
     settings_menu_keyboard,
 )
 from app.services.formatters import format_saved_schedule, format_schedule, format_settings
-from app.services.scheduler import generate, parse_date
+from app.services.scheduler import generate, parse_date, validate_schedule
 from app.services.settings_store import (
     add_extra_slot_participant,
     get_saved_schedule,
@@ -33,6 +33,7 @@ from app.services.settings_store import (
 router = Router()
 pending_actions: dict[int, dict[str, Any]] = {}
 last_month_by_user: dict[int, tuple[int, int]] = {}
+GENERATE_ATTEMPTS = 2
 
 
 def is_admin(user_id: int) -> bool:
@@ -57,6 +58,27 @@ def is_guest_name(value: str) -> bool:
 
 def schedule_people(values: list[str]) -> list[str]:
     return [name for name in values if not is_guest_name(name)]
+
+
+def planned_schedule_from_saved(saved: dict[str, Any]) -> dict[int, list[str]]:
+    return {
+        slot["slot_no"]: [
+            participant["name"]
+            for participant in slot["participants"]
+            if participant["is_scheduled"]
+        ]
+        for slot in saved["slots"]
+    }
+
+
+def same_schedule(first: dict[int, list[str]], second: dict[int, list[str]]) -> bool:
+    return {
+        slot_id: tuple(names)
+        for slot_id, names in first.items()
+    } == {
+        slot_id: tuple(names)
+        for slot_id, names in second.items()
+    }
 
 
 def now_month() -> tuple[int, int]:
@@ -154,18 +176,59 @@ async def settings_for_month(year: int, month: int) -> dict:
     auto_blocked = await previous_month_blocked_start(year, month)
     previous_counts = await previous_month_participation_counts(year, month)
 
-    if auto_blocked:
-        settings["blockedStart"] = auto_blocked
-
+    settings["blockedStart"] = auto_blocked
     settings["previousParticipationCounts"] = previous_counts
 
     return settings
 
 
-async def generated_schedule(year: int, month: int):
+def validate_saved_schedule(saved: dict[str, Any], settings: dict[str, Any]) -> list[str]:
+    slots = {slot["slot_no"]: slot["slot_type"] for slot in saved["slots"]}
+    schedule = planned_schedule_from_saved(saved)
+    people = set(schedule_people(settings["people"]))
+
+    for names in schedule.values():
+        people.update(names)
+
+    person_slots = {person: [] for person in people}
+
+    for slot_no, names in schedule.items():
+        for name in names:
+            person_slots.setdefault(name, []).append(slot_no)
+
+    return validate_schedule(
+        schedule,
+        person_slots,
+        slots,
+        settings["limits"],
+        settings["blockedStart"],
+        settings["singleParticipation"],
+        settings["onlySunday"],
+    )
+
+
+async def generated_schedule(
+    year: int,
+    month: int,
+    avoid_schedule: dict[int, list[str]] | None = None,
+):
     settings = await settings_for_month(year, month)
     settings = {**settings, "people": schedule_people(settings["people"])}
-    return generate(settings, year, month)
+    last_result = None
+
+    for seed_offset in range(GENERATE_ATTEMPTS):
+        result = generate(settings, year, month, seed_offset=seed_offset)
+        last_result = result
+
+        if result.errors:
+            continue
+
+        if avoid_schedule and same_schedule(result.schedule, avoid_schedule):
+            continue
+
+        return result
+
+    return last_result
 
 
 async def ensure_saved_schedule(year: int, month: int) -> tuple[dict[str, Any] | None, bool]:
@@ -175,6 +238,9 @@ async def ensure_saved_schedule(year: int, month: int) -> tuple[dict[str, Any] |
         return saved, False
 
     result = await generated_schedule(year, month)
+    if result.errors:
+        return None, False
+
     await save_schedule_result(result)
     return await get_saved_schedule(year, month), True
 
@@ -186,7 +252,9 @@ async def show_schedule(message: Message, year: int | None = None, month: int | 
     saved = await get_saved_schedule(year, month)
 
     if saved:
-        await message.answer(format_saved_schedule(saved), reply_markup=schedule_keyboard(require_admin(message)))
+        settings = await settings_for_month(year, month)
+        errors = validate_saved_schedule(saved, settings)
+        await message.answer(format_saved_schedule(saved, errors), reply_markup=schedule_keyboard(require_admin(message)))
         return
 
     result = await generated_schedule(year, month)
@@ -401,7 +469,40 @@ async def resave_schedule_button(message: Message) -> None:
 
 
 async def save_schedule_for_month(message: Message, year: int, month: int, resave: bool = False) -> None:
-    result = await generated_schedule(year, month)
+    saved_before = await get_saved_schedule(year, month)
+
+    if resave:
+        if not saved_before:
+            await message.answer(
+                f"На {month_label(year, month)} ещё нет сохранённого графика. Сначала сохраните график.",
+                reply_markup=schedule_keyboard(True),
+            )
+            return
+
+        if saved_before["status"] == "published":
+            await message.answer(
+                "Опубликованный график нельзя пересохранить. Сначала переведите его в статус «не опубликован».",
+                reply_markup=schedule_keyboard(True),
+            )
+            return
+
+    old_schedule = planned_schedule_from_saved(saved_before) if saved_before else None
+    result = await generated_schedule(year, month, avoid_schedule=old_schedule if resave else None)
+
+    if result.errors:
+        await message.answer(
+            "График не сохранён, потому что он не прошёл проверку правил.\n\n" + format_schedule(result),
+            reply_markup=schedule_keyboard(True),
+        )
+        return
+
+    if resave and old_schedule and same_schedule(result.schedule, old_schedule):
+        await message.answer(
+            "График не пересохранён: после нескольких попыток не нашёл вариант, отличающийся от текущего и проходящий все правила.",
+            reply_markup=schedule_keyboard(True),
+        )
+        return
+
     await save_schedule_result(result)
     saved = await get_saved_schedule(year, month)
     set_last_month(message, year, month)

@@ -38,7 +38,7 @@ def format_schedule(result: ScheduleResult) -> str:
     return "\n".join(lines).strip()
 
 
-def format_saved_schedule(saved: dict) -> str:
+def format_saved_schedule(saved: dict, errors: list[str] | None = None) -> str:
     lines = [
         f"<b>Сохранённый график на {saved['month']:02d}.{saved['year']}</b>",
         f"Статус: <b>{STATUS_LABELS.get(saved['status'], saved['status'])}</b>",
@@ -64,6 +64,10 @@ def format_saved_schedule(saved: dict) -> str:
                 lines.append(f"{prefix} {participant['name']} — {status}")
 
         lines.append("")
+
+    if errors:
+        lines.append("<b>Проверка:</b>")
+        lines.extend(f"• {error}" for error in errors)
 
     return "\n".join(lines).strip()
 

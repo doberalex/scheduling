@@ -263,14 +263,22 @@ def solve_by_person_options(
     person_slots: dict[str, list[int]],
     index: int = 0,
     deadline: float | None = None,
+    failed_states: set[tuple[int, tuple[tuple[int, int], ...]]] | None = None,
 ) -> bool:
+    failed_states = failed_states if failed_states is not None else set()
+
     if deadline is not None and monotonic() > deadline:
         raise ScheduleSearchTimeout()
 
     if index >= len(people):
         return remaining_total(remaining) == 0
 
+    state_key = (index, tuple(sorted(remaining.items())))
+    if state_key in failed_states:
+        return False
+
     if remaining_total(remaining) > max_assignable_from_index(people, options_by_person, index):
+        failed_states.add(state_key)
         return False
 
     person = people[index]
@@ -288,11 +296,13 @@ def solve_by_person_options(
             person_slots,
             index + 1,
             deadline,
+            failed_states,
         ):
             return True
 
         person_slots[person] = []
 
+    failed_states.add(state_key)
     return False
 
 
@@ -353,7 +363,13 @@ def try_build_schedule_by_person_options(
     )
     person_slots = create_empty_person_slots(people)
 
-    if not solve_by_person_options(ordered_people, options_by_person, slot_limits, person_slots, deadline=deadline):
+    if not solve_by_person_options(
+        ordered_people,
+        options_by_person,
+        slot_limits,
+        person_slots,
+        deadline=deadline,
+    ):
         return False, create_empty_schedule(slots), create_empty_person_slots(people)
 
     return True, build_schedule_from_person_slots(person_slots, slots), person_slots
@@ -399,11 +415,28 @@ def compare_candidates(person: str, person_slots: dict[str, list[int]]) -> tuple
 
 def compare_balanced_candidates(
     person: str,
+    slot_id: int,
     person_slots: dict[str, list[int]],
+    slots: dict[int, str],
+    single_participation: list[str],
+    only_sunday: list[str],
     previous_participation_counts: dict[str, int],
-) -> tuple[int, int, str]:
+    seed: int | None,
+) -> tuple[int, int, int, str]:
     current_count = len(person_slots.get(person, []))
     previous_count = previous_participation_counts.get(person, 0)
+    type_priority = 1
+
+    if needs_both_slot_types(person, single_participation, only_sunday):
+        current_types = get_person_slot_types(person_slots.get(person, []), slots)
+        slot_type = slots[slot_id]
+
+        if current_count == 1:
+            type_priority = 0 if slot_type not in current_types else 3
+        elif {"fri", "sun"}.issubset(current_types):
+            type_priority = 2
+    elif person in single_participation:
+        type_priority = 0 if slots[slot_id] == "sun" else 4
 
     if previous_count >= 3:
         target = 2
@@ -414,7 +447,9 @@ def compare_balanced_candidates(
 
     over_target = 1 if current_count >= target else 0
 
-    return over_target, current_count, person
+    tie_breaker = person if seed is None else f"{seeded_rank(person, seed):010d}"
+
+    return type_priority, over_target, current_count, tie_breaker
 
 
 def find_next_slot(
@@ -470,6 +505,7 @@ def build_greedy_schedule(
     blocked_start: list[str],
     single_participation: list[str],
     only_sunday: list[str],
+    seed: int | None,
     previous_participation_counts: dict[str, int] | None = None,
 ) -> tuple[dict[int, list[str]], dict[str, list[int]]]:
     previous_participation_counts = previous_participation_counts or {}
@@ -503,8 +539,13 @@ def build_greedy_schedule(
                 ],
                 key=lambda person: compare_balanced_candidates(
                     person,
+                    slot_id,
                     person_slots,
+                    slots,
+                    single_participation,
+                    only_sunday,
                     previous_participation_counts,
+                    seed,
                 ),
             )
 
@@ -618,6 +659,7 @@ def build_schedule(
     only_sunday: list[str],
     seed: int,
     previous_participation_counts: dict[str, int] | None = None,
+    greedy_seed: int | None = None,
 ) -> tuple[dict[int, list[str]], dict[str, list[int]], dict[int, int]]:
     base_slot_limits = get_base_slot_limits(slots, limits)
     variants = [base_slot_limits]
@@ -676,6 +718,7 @@ def build_schedule(
         blocked_start,
         single_participation,
         only_sunday,
+        greedy_seed,
         previous_participation_counts,
     )
     return schedule, person_slots, base_slot_limits
@@ -755,9 +798,14 @@ def get_start_capacity_error(people: list[str], slots: dict[int, str], limits: d
     return f"Слоты 1 и 2 требуют {needed} разных участников, доступно только {len(available)}: {', '.join(available)}"
 
 
-def generate(settings: dict[str, Any], year: int, month: int) -> ScheduleResult:
+def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int = 0) -> ScheduleResult:
     slots, slot_dates = build_month_slots(year, month, settings.get("extraDates", {}))
-    seed = zlib.crc32(f"{year:04d}-{month:02d}".encode("utf-8"))
+    seed_text = f"{year:04d}-{month:02d}"
+    if seed_offset:
+        seed_text = f"{seed_text}:{seed_offset}"
+
+    seed = zlib.crc32(seed_text.encode("utf-8"))
+    greedy_seed = seed if seed_offset else None
     schedule, person_slots, resolved_slot_limits = build_schedule(
         settings["people"],
         slots,
@@ -767,6 +815,7 @@ def generate(settings: dict[str, Any], year: int, month: int) -> ScheduleResult:
         settings["onlySunday"],
         seed,
         settings.get("previousParticipationCounts", {}),
+        greedy_seed,
     )
     errors = validate_schedule(
         schedule,
