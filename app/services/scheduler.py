@@ -100,7 +100,7 @@ def valid_person_slot_types(
         return True
 
     if len(slots_list) < 2:
-        return False
+        return True
 
     types = get_person_slot_types(slots_list, slots)
 
@@ -192,6 +192,10 @@ def get_person_options(
             options.append(combination)
             continue
 
+        if count == 1 and previous_count != 1:
+            options.append(combination)
+            continue
+
         if count >= 2 and valid_person_slot_types(person, combination, slots, single_participation, only_sunday):
             options.append(combination)
 
@@ -218,6 +222,9 @@ def participation_count_priority(
 
     if previous_count == 2:
         return abs(count - 3), -count
+
+    if previous_count == 1:
+        return abs(count - 2), -count
 
     return -count, 0
 
@@ -732,8 +739,10 @@ def validate_schedule(
     blocked_start: list[str],
     single_participation: list[str],
     only_sunday: list[str],
+    previous_participation_counts: dict[str, int] | None = None,
 ) -> list[str]:
     errors = []
+    previous_participation_counts = previous_participation_counts or {}
 
     for slot_id, people in schedule.items():
         slot_type = slots[slot_id]
@@ -758,6 +767,13 @@ def validate_schedule(
 
         if len(sorted_slots) > max_participation:
             errors.append(f"{person}: больше {max_participation} участий")
+
+        if (
+            len(sorted_slots) == 1
+            and needs_both_slot_types(person, single_participation, only_sunday)
+            and previous_participation_counts.get(person) == 1
+        ):
+            errors.append(f"{person}: не должен участвовать 1 раз два месяца подряд")
 
         if sorted_slots and not valid_person_slot_types(person, sorted_slots, slots, single_participation, only_sunday):
             errors.append(f"{person}: должны быть участия и в пятницу, и в воскресенье")
@@ -825,6 +841,7 @@ def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int =
         settings["blockedStart"],
         settings["singleParticipation"],
         settings["onlySunday"],
+        settings.get("previousParticipationCounts", {}),
     )
     start_capacity_error = get_start_capacity_error(
         settings["people"],

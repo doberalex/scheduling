@@ -204,6 +204,7 @@ def validate_saved_schedule(saved: dict[str, Any], settings: dict[str, Any]) -> 
         settings["blockedStart"],
         settings["singleParticipation"],
         settings["onlySunday"],
+        settings.get("previousParticipationCounts", {}),
     )
 
 
