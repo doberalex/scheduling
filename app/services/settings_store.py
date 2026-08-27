@@ -763,12 +763,25 @@ async def previous_month_blocked_start(year: int, month: int) -> list[str]:
     if not saved:
         return []
 
-    blocked = []
+    last_slots = saved["slots"][-2:]
+    participants = [
+        participant
+        for slot in last_slots
+        for participant in slot["participants"]
+    ]
+    has_attendance_marks = any(
+        participant["attendance_status"] == "attended"
+        for participant in participants
+    )
 
-    for slot in saved["slots"][-2:]:
-        for participant in slot["participants"]:
-            if participant["attendance_status"] == "attended":
-                blocked.append(participant["name"])
+    if has_attendance_marks:
+        blocked = [
+            participant["name"]
+            for participant in participants
+            if participant["attendance_status"] == "attended"
+        ]
+    else:
+        blocked = [participant["name"] for participant in participants]
 
     return list(dict.fromkeys(blocked))
 
