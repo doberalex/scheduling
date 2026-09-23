@@ -12,14 +12,12 @@ class MinisterScheduleTests(unittest.TestCase):
         self.settings["blockedStart"] = []
         self.settings["previousParticipationCounts"] = {}
 
-    def test_one_minister_keeps_regular_assignments(self):
+    def test_one_minister_reports_impossible_rest_rule(self):
         minister = "Алексей Б."
         self.settings["ministers"] = [minister]
         result = generate(self.settings, 2026, 9)
 
-        self.assertEqual([], result.errors)
-        self.assertGreaterEqual(len(result.person_slots[minister]), 2)
-        self.assertLessEqual(len(result.person_slots[minister]), 3)
+        self.assertTrue(any("обычные участия" in error for error in result.errors))
         for slot_id, slot_type in result.slots.items():
             names = result.schedule[slot_id]
             if slot_type == "sun":
@@ -41,7 +39,7 @@ class MinisterScheduleTests(unittest.TestCase):
             self.assertEqual([], result.errors)
             for name in ministers:
                 regular_counts[name] = len(result.person_slots[name])
-                self.assertIn(regular_counts[name], (2, 3))
+                self.assertIn(regular_counts[name], (1, 2, 3))
             for slot_id, slot_type in result.slots.items():
                 self.assertEqual(3 if slot_type == "fri" else 6, len(result.schedule[slot_id]))
                 if slot_type == "sun":
@@ -51,7 +49,6 @@ class MinisterScheduleTests(unittest.TestCase):
                 for slot_id, slot_type in result.slots.items() if slot_type == "sun"
             )
 
-        self.assertTrue(all(first != second for first, second in zip(assigned, assigned[1:])))
         self.assertLessEqual(abs(assigned.count(ministers[0]) - assigned.count(ministers[1])), 1)
 
     def test_missing_minister_fails_validation(self):
@@ -89,6 +86,24 @@ class MinisterScheduleTests(unittest.TestCase):
             ],
         }
         self.assertEqual([], validate_saved_schedule(saved, self.settings))
+        special_slot = next(slot_id for slot_id in result.minister_assignments if slot_id > 1)
+        adjacent_slot = saved["slots"][special_slot - 2]
+        adjacent_slot["participants"][0]["name"] = result.minister_assignments[special_slot]
+        errors = validate_saved_schedule(saved, self.settings)
+        self.assertTrue(any("нет отдыха" in error for error in errors))
+
+    def test_minister_has_a_rest_slot_between_all_appointments(self):
+        ministers = ["Алексей Б.", "Андрей К."]
+        self.settings["ministers"] = ministers
+        result = generate(self.settings, 2026, 10)
+        self.assertEqual([], result.errors)
+        for minister in ministers:
+            all_slots = sorted(
+                result.person_slots[minister]
+                + [slot_id for slot_id, name in result.minister_assignments.items() if name == minister]
+            )
+            self.assertGreaterEqual(len(result.person_slots[minister]), 2)
+            self.assertTrue(all(second - first >= 2 for first, second in zip(all_slots, all_slots[1:])))
 
 
 if __name__ == "__main__":

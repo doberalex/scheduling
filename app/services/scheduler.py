@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zlib
+from itertools import permutations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from time import monotonic
@@ -10,6 +11,8 @@ from typing import Any
 SLOT_TYPES = {"fri", "sun"}
 SLOT_LABELS = {"fri": "пятница", "sun": "воскресенье"}
 SEARCH_TIMEOUT_SECONDS = 15.0
+MINISTER_IMPROVEMENT_SECONDS = 3.0
+MAX_MINISTER_PATTERNS = 32
 
 
 class ScheduleSearchTimeout(RuntimeError):
@@ -126,7 +129,7 @@ def create_empty_person_slots(people: list[str]) -> dict[str, list[int]]:
 
 
 def basic_can_use_slot(person: str, slot_id: int, slots: dict[int, str], blocked_start: list[str], only_sunday: list[str], minister_assignments: dict[int, str] | None = None) -> bool:
-    if (minister_assignments or {}).get(slot_id) == person:
+    if any(name == person and abs(special_slot - slot_id) < 2 for special_slot, name in (minister_assignments or {}).items()):
         return False
     if person in blocked_start and slot_id in [1, 2]:
         return False
@@ -201,7 +204,7 @@ def get_person_options(
             options.append(combination)
             continue
 
-        if count == 1 and previous_count != 1:
+        if count == 1 and (previous_count != 1 or person in (minister_assignments or {}).values()):
             options.append(combination)
             continue
 
@@ -405,7 +408,7 @@ def can_assign_with_slot_limits(
     only_sunday: list[str],
     minister_assignments: dict[int, str] | None = None,
 ) -> bool:
-    if (minister_assignments or {}).get(slot_id) == person:
+    if any(name == person and abs(special_slot - slot_id) < 2 for special_slot, name in (minister_assignments or {}).items()):
         return False
     if person in blocked_start and slot_id in [1, 2]:
         return False
@@ -690,10 +693,21 @@ def build_schedule(
     previous_participation_counts: dict[str, int] | None = None,
     greedy_seed: int | None = None,
     minister_assignments: dict[int, str] | None = None,
+    deadline: float | None = None,
 ) -> tuple[dict[int, list[str]], dict[str, list[int]], dict[int, int]]:
     base_slot_limits = get_base_slot_limits(slots, limits)
     variants = [base_slot_limits]
-    deadline = monotonic() + SEARCH_TIMEOUT_SECONDS
+    deadline = deadline if deadline is not None else monotonic() + SEARCH_TIMEOUT_SECONDS
+
+    if any(
+        not get_allowed_slots_for_person(person, slots, blocked_start, only_sunday, minister_assignments)
+        for person in people
+    ):
+        schedule, person_slots = build_greedy_schedule(
+            people, slots, base_slot_limits, blocked_start, single_participation,
+            only_sunday, greedy_seed, previous_participation_counts, minister_assignments,
+        )
+        return schedule, person_slots, base_slot_limits
 
     for slot_id, value in base_slot_limits.items():
         if value <= 0:
@@ -802,6 +816,10 @@ def validate_schedule(
     for person, slots_list in person_slots.items():
         sorted_slots = sorted(slots_list)
         max_participation = get_max_participation(person, single_participation)
+        special_slots = [slot_id for slot_id, name in minister_assignments.items() if name == person]
+
+        if special_slots and not sorted_slots:
+            errors.append(f"{person}: не удалось назначить обычные участия с отдыхом между служениями")
 
         if len(sorted_slots) > max_participation:
             errors.append(f"{person}: больше {max_participation} участий")
@@ -810,6 +828,7 @@ def validate_schedule(
             len(sorted_slots) == 1
             and needs_both_slot_types(person, single_participation, only_sunday)
             and previous_participation_counts.get(person) == 1
+            and person not in minister_assignments.values()
         ):
             errors.append(f"{person}: не должен участвовать 1 раз два месяца подряд")
 
@@ -820,6 +839,15 @@ def validate_schedule(
             for second_slot in sorted_slots[first_index + 1 :]:
                 if abs(first_slot - second_slot) < 3:
                     errors.append(f"{person}: нарушен интервал между слотами {first_slot} и {second_slot}")
+
+        for first_index, first_slot in enumerate(special_slots):
+            for second_slot in special_slots[first_index + 1 :]:
+                if abs(first_slot - second_slot) < 2:
+                    errors.append(f"{person}: нет отдыха между служениями {first_slot} и {second_slot}")
+        for regular_slot in sorted_slots:
+            for special_slot in special_slots:
+                if abs(regular_slot - special_slot) < 2:
+                    errors.append(f"{person}: нет отдыха между обычным участием {regular_slot} и служением {special_slot}")
 
     return errors
 
@@ -852,52 +880,57 @@ def get_start_capacity_error(people: list[str], slots: dict[int, str], limits: d
     return f"Слоты 1 и 2 требуют {needed} разных участников, доступно только {len(available)}: {', '.join(available)}"
 
 
+def minister_rotation_candidates(
+    slots: dict[int, str], ministers: list[str], year: int, month: int, seed: int,
+) -> list[dict[int, str]]:
+    if not ministers:
+        return [{}]
+
+    sunday_slots = [slot_id for slot_id, slot_type in slots.items() if slot_type == "sun"]
+    first_sunday = date(year, month, 1)
+    first_sunday += timedelta(days=(6 - first_sunday.weekday()) % 7)
+    rotation_start = (first_sunday - date(2020, 1, 5)).days // 7
+    base = tuple(ministers[(rotation_start + index) % len(ministers)] for index in range(len(sunday_slots)))
+    if len(sunday_slots) <= 6:
+        orders = set(permutations(base))
+    else:
+        orders = {base}
+        for offset in range(len(ministers)):
+            rotated = ministers[offset:] + ministers[:offset]
+            orders.add(tuple(name for name in rotated for _ in range(base.count(name))))
+
+    ranked = sorted(
+        orders,
+        key=lambda order: (
+            -sum(first == second for first, second in zip(order, order[1:])),
+            seeded_rank("|".join(order), seed),
+        ),
+    )
+    candidates = []
+    for order in ranked:
+        assignment = dict(zip(sunday_slots, order))
+        assigned_slots = list(assignment.items())
+        if any(
+            first_name == second_name and abs(first_slot - second_slot) < 2
+            for (first_slot, first_name), (second_slot, second_name) in zip(assigned_slots, assigned_slots[1:])
+        ):
+            continue
+        candidates.append(assignment)
+        if len(candidates) >= MAX_MINISTER_PATTERNS:
+            break
+    return candidates or [dict(zip(sunday_slots, base))]
+
+
 def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int = 0) -> ScheduleResult:
     slots, slot_dates = build_month_slots(year, month, settings.get("extraDates", {}))
     ministers = sorted(set(settings.get("ministers", [])) & set(settings["people"]), key=str.casefold)
-    minister_assignments: dict[int, str] = {}
-    if ministers:
-        sunday_slots = [slot_id for slot_id, slot_type in slots.items() if slot_type == "sun"]
-        first_calendar_sunday = date(year, month, 1)
-        first_calendar_sunday += timedelta(days=(6 - first_calendar_sunday.weekday()) % 7)
-        rotation_start = (first_calendar_sunday - date(2020, 1, 5)).days // 7
-        minister_assignments = {
-            slot_id: ministers[(rotation_start + index) % len(ministers)]
-            for index, slot_id in enumerate(sunday_slots)
-        }
     seed_text = f"{year:04d}-{month:02d}"
     if seed_offset:
         seed_text = f"{seed_text}:{seed_offset}"
 
     seed = zlib.crc32(seed_text.encode("utf-8"))
     greedy_seed = seed if seed_offset else None
-    schedule, person_slots, resolved_slot_limits = build_schedule(
-        settings["people"],
-        slots,
-        settings["limits"],
-        settings["blockedStart"],
-        settings["singleParticipation"],
-        settings["onlySunday"],
-        seed,
-        settings.get("previousParticipationCounts", {}),
-        greedy_seed,
-        minister_assignments,
-    )
-    for slot_id, minister in minister_assignments.items():
-        schedule[slot_id].append(minister)
-        resolved_slot_limits[slot_id] += 1
-    errors = validate_schedule(
-        schedule,
-        person_slots,
-        slots,
-        settings["limits"],
-        settings["blockedStart"],
-        settings["singleParticipation"],
-        settings["onlySunday"],
-        settings.get("previousParticipationCounts", {}),
-        ministers,
-        minister_assignments,
-    )
+    candidates = minister_rotation_candidates(slots, ministers, year, month, seed)
     start_capacity_error = get_start_capacity_error(
         settings["people"],
         slots,
@@ -906,17 +939,45 @@ def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int =
         settings["onlySunday"],
     )
 
-    if start_capacity_error:
-        errors.append(start_capacity_error)
-
-    return ScheduleResult(
-        year=year,
-        month=month,
-        slots=slots,
-        slot_dates=slot_dates,
-        schedule=schedule,
-        person_slots=person_slots,
-        resolved_slot_limits=resolved_slot_limits,
-        errors=errors,
-        minister_assignments=minister_assignments,
-    )
+    deadline = monotonic() + SEARCH_TIMEOUT_SECONDS
+    best_result = None
+    best_valid_result = None
+    best_valid_score = -1
+    for index, minister_assignments in enumerate(candidates):
+        remaining = max(0.0, deadline - monotonic())
+        attempt_deadline = monotonic() + min(remaining, max(1.0, remaining / (len(candidates) - index)))
+        schedule, person_slots, resolved_slot_limits = build_schedule(
+            settings["people"], slots, settings["limits"], settings["blockedStart"],
+            settings["singleParticipation"], settings["onlySunday"], seed,
+            settings.get("previousParticipationCounts", {}), greedy_seed,
+            minister_assignments, attempt_deadline,
+        )
+        for slot_id, minister in minister_assignments.items():
+            schedule[slot_id].append(minister)
+            resolved_slot_limits[slot_id] += 1
+        errors = validate_schedule(
+            schedule, person_slots, slots, settings["limits"], settings["blockedStart"],
+            settings["singleParticipation"], settings["onlySunday"],
+            settings.get("previousParticipationCounts", {}), ministers, minister_assignments,
+        )
+        if start_capacity_error:
+            errors.append(start_capacity_error)
+        result = ScheduleResult(
+            year=year, month=month, slots=slots, slot_dates=slot_dates,
+            schedule=schedule, person_slots=person_slots,
+            resolved_slot_limits=resolved_slot_limits, errors=errors,
+            minister_assignments=minister_assignments,
+        )
+        if not errors:
+            score = min((len(person_slots[person]) for person in ministers), default=3)
+            if score >= 2:
+                return result
+            if score > best_valid_score:
+                best_valid_result = result
+                best_valid_score = score
+                deadline = min(deadline, monotonic() + MINISTER_IMPROVEMENT_SECONDS)
+        if best_result is None or len(errors) < len(best_result.errors):
+            best_result = result
+        if monotonic() >= deadline:
+            break
+    return best_valid_result or best_result
