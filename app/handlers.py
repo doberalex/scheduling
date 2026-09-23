@@ -215,10 +215,17 @@ def validate_saved_schedule(saved: dict[str, Any], settings: dict[str, Any]) -> 
         people.update(names)
 
     person_slots = {person: [] for person in people}
+    minister_assignments = {}
 
-    for slot_no, names in schedule.items():
-        for name in names:
-            person_slots.setdefault(name, []).append(slot_no)
+    for slot in saved["slots"]:
+        slot_no = slot["slot_no"]
+        for participant in slot["participants"]:
+            if not participant["is_scheduled"]:
+                continue
+            if participant["is_minister_assignment"]:
+                minister_assignments[slot_no] = participant["name"]
+            else:
+                person_slots.setdefault(participant["name"], []).append(slot_no)
 
     return validate_schedule(
         schedule,
@@ -229,7 +236,8 @@ def validate_saved_schedule(saved: dict[str, Any], settings: dict[str, Any]) -> 
         settings["singleParticipation"],
         settings["onlySunday"],
         settings.get("previousParticipationCounts", {}),
-        settings["ministers"],
+        list(minister_assignments.values()),
+        minister_assignments,
     )
 
 
@@ -820,7 +828,8 @@ async def handle_slot_selection(message: Message, state: dict[str, Any], text: s
     settings = await load_settings()
 
     if state["action"] == "replace_slot":
-        planned_people = schedule_people(settings["people"])
+        reserved_names = {item["name"] for item in slot["participants"] if item["is_minister_assignment"]}
+        planned_people = [name for name in schedule_people(settings["people"]) if name not in reserved_names]
         pending_actions[message.from_user.id] = {
             "action": "replace_people",
             "year": state["year"],
@@ -865,7 +874,10 @@ async def handle_replace_people(message: Message, state: dict[str, Any], text: s
         return
 
     settings = await load_settings()
-    planned_people = schedule_people(settings["people"])
+    saved = await get_saved_schedule(state["year"], state["month"])
+    slot = next((item for item in saved["slots"] if item["slot_no"] == state["slot_no"]), None) if saved else None
+    reserved_names = {item["name"] for item in slot["participants"] if item["is_minister_assignment"]} if slot else set()
+    planned_people = [name for name in schedule_people(settings["people"]) if name not in reserved_names]
 
     if text not in planned_people:
         await message.answer("Выберите участника из списка.")

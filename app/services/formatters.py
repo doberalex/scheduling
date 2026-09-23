@@ -25,7 +25,10 @@ def format_schedule(result: ScheduleResult) -> str:
 
     for slot_id, slot_type in result.slots.items():
         people = result.schedule.get(slot_id, [])
-        names = ", ".join(people) if people else "нет назначений"
+        names = ", ".join(
+            f"⛪ {person}" if result.minister_assignments.get(slot_id) == person else person
+            for person in people
+        ) if people else "нет назначений"
         label = SLOT_LABELS.get(slot_type, slot_type)
         lines.append(f"<b>{slot_id}. {result.slot_dates[slot_id]} ({label})</b>")
         lines.append(names)
@@ -56,6 +59,8 @@ def format_saved_schedule(saved: dict, errors: list[str] | None = None) -> str:
                 prefix = "•"
                 if not participant["is_scheduled"]:
                     prefix = "➕"
+                elif participant["is_minister_assignment"]:
+                    prefix = "⛪"
 
                 status = ATTENDANCE_LABELS.get(
                     participant["attendance_status"],

@@ -224,6 +224,7 @@ async def init_db() -> None:
                     slot_id INT UNSIGNED NOT NULL,
                     participant_id INT UNSIGNED NOT NULL,
                     is_scheduled TINYINT NOT NULL DEFAULT 1,
+                    is_minister_assignment TINYINT NOT NULL DEFAULT 0,
                     attendance_status VARCHAR(32) NOT NULL DEFAULT 'planned',
                     sort_order INT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -243,12 +244,25 @@ async def init_db() -> None:
             )
             await cursor.execute(
                 """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema=%s AND table_name='schedule_slot_participants'
+                    AND column_name='is_minister_assignment'
+                """,
+                (DB_NAME,),
+            )
+            if (await cursor.fetchone())[0] == 0:
+                await cursor.execute(
+                    "ALTER TABLE schedule_slot_participants ADD COLUMN is_minister_assignment TINYINT NOT NULL DEFAULT 0"
+                )
+            await cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS schedule_attendance_events (
                     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
                     schedule_id INT UNSIGNED NOT NULL,
                     slot_id INT UNSIGNED NOT NULL,
                     participant_id INT UNSIGNED NOT NULL,
                     is_scheduled TINYINT NOT NULL DEFAULT 1,
+                    is_minister_assignment TINYINT NOT NULL DEFAULT 0,
                     attendance_status VARCHAR(32) NOT NULL,
                     event_type VARCHAR(32) NOT NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -271,6 +285,18 @@ async def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema=%s AND table_name='schedule_attendance_events'
+                    AND column_name='is_minister_assignment'
+                """,
+                (DB_NAME,),
+            )
+            if (await cursor.fetchone())[0] == 0:
+                await cursor.execute(
+                    "ALTER TABLE schedule_attendance_events ADD COLUMN is_minister_assignment TINYINT NOT NULL DEFAULT 0"
+                )
             await cursor.execute("SET sql_notes=1")
             await cursor.execute("SELECT COUNT(*) FROM schedule_participants")
             row = await cursor.fetchone()
@@ -319,18 +345,20 @@ async def _log_attendance_event(
     is_scheduled: bool,
     attendance_status: str,
     event_type: str,
+    is_minister_assignment: bool = False,
 ) -> None:
     await cursor.execute(
         """
         INSERT INTO schedule_attendance_events
-            (schedule_id, slot_id, participant_id, is_scheduled, attendance_status, event_type)
-        VALUES (%s, %s, %s, %s, %s, %s)
+            (schedule_id, slot_id, participant_id, is_scheduled, is_minister_assignment, attendance_status, event_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
         (
             schedule_id,
             slot_id,
             participant_id,
             1 if is_scheduled else 0,
+            1 if is_minister_assignment else 0,
             attendance_status,
             event_type,
         ),
@@ -517,10 +545,10 @@ async def save_schedule_result(result: ScheduleResult) -> None:
                     await cursor.execute(
                         """
                         INSERT INTO schedule_slot_participants
-                            (slot_id, participant_id, is_scheduled, attendance_status, sort_order)
-                        VALUES (%s, %s, 1, 'planned', %s)
+                            (slot_id, participant_id, is_scheduled, is_minister_assignment, attendance_status, sort_order)
+                        VALUES (%s, %s, 1, %s, 'planned', %s)
                         """,
-                        (slot_id, participant_id, sort_order),
+                        (slot_id, participant_id, int(result.minister_assignments.get(slot_no) == name), sort_order),
                     )
                     await _log_attendance_event(
                         cursor,
@@ -530,6 +558,7 @@ async def save_schedule_result(result: ScheduleResult) -> None:
                         True,
                         "planned",
                         "save_schedule",
+                        result.minister_assignments.get(slot_no) == name,
                     )
 
 
@@ -561,6 +590,7 @@ async def get_saved_schedule(year: int, month: int) -> dict[str, Any] | None:
                     DATE_FORMAT(s.date_value, '%%d.%%m.%%Y') AS date_text,
                     p.name,
                     sp.is_scheduled,
+                    sp.is_minister_assignment,
                     sp.attendance_status,
                     sp.sort_order
                 FROM schedule_slots s
@@ -592,6 +622,7 @@ async def get_saved_schedule(year: int, month: int) -> dict[str, Any] | None:
                 {
                     "name": row["name"],
                     "is_scheduled": bool(row["is_scheduled"]),
+                    "is_minister_assignment": bool(row["is_minister_assignment"]),
                     "attendance_status": row["attendance_status"],
                 }
             )
@@ -642,7 +673,19 @@ async def replace_slot_participants(year: int, month: int, slot_no: int, names: 
                 return False
 
             await cursor.execute(
-                "DELETE FROM schedule_slot_participants WHERE slot_id=%s AND is_scheduled=1",
+                """
+                SELECT p.name FROM schedule_slot_participants sp
+                INNER JOIN schedule_participants p ON p.id=sp.participant_id
+                WHERE sp.slot_id=%s AND sp.is_minister_assignment=1
+                """,
+                (slot_id,),
+            )
+            reserved_names = {row[0] for row in await cursor.fetchall()}
+            if reserved_names.intersection(names):
+                return False
+
+            await cursor.execute(
+                "DELETE FROM schedule_slot_participants WHERE slot_id=%s AND is_scheduled=1 AND is_minister_assignment=0",
                 (slot_id,),
             )
 
@@ -655,6 +698,7 @@ async def replace_slot_participants(year: int, month: int, slot_no: int, names: 
                     VALUES (%s, %s, 1, 'planned', %s)
                     ON DUPLICATE KEY UPDATE
                         is_scheduled=1,
+                        is_minister_assignment=0,
                         attendance_status='planned',
                         sort_order=VALUES(sort_order)
                     """,
@@ -698,7 +742,7 @@ async def set_slot_participant_attendance(
 
             await cursor.execute(
                 """
-                SELECT sp.participant_id, sp.is_scheduled
+                SELECT sp.participant_id, sp.is_scheduled, sp.is_minister_assignment
                 FROM schedule_slot_participants sp
                 INNER JOIN schedule_participants p ON p.id = sp.participant_id
                 WHERE sp.slot_id=%s AND p.name=%s
@@ -728,6 +772,7 @@ async def set_slot_participant_attendance(
                 is_scheduled,
                 status,
                 "attendance_status",
+                bool(row[2]),
             )
 
     return True
@@ -833,7 +878,7 @@ async def previous_month_participation_counts(year: int, month: int) -> dict[str
 
     for slot in saved["slots"]:
         for participant in slot["participants"]:
-            if not participant["is_scheduled"]:
+            if not participant["is_scheduled"] or participant["is_minister_assignment"]:
                 continue
 
             name = participant["name"]
