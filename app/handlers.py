@@ -25,6 +25,7 @@ from app.services.settings_store import (
     replace_slot_participants,
     save_schedule_result,
     save_settings,
+    set_minister_role,
     set_schedule_status,
     set_slot_participant_attendance,
 )
@@ -228,6 +229,7 @@ def validate_saved_schedule(saved: dict[str, Any], settings: dict[str, Any]) -> 
         settings["singleParticipation"],
         settings["onlySunday"],
         settings.get("previousParticipationCounts", {}),
+        settings["ministers"],
     )
 
 
@@ -463,8 +465,11 @@ async def participants_menu_button(message: Message) -> None:
 @router.message(F.text.in_({"📋 Список участников"}))
 async def participants_button(message: Message) -> None:
     settings = await load_settings()
+    ministers = set(settings["ministers"])
     await message.answer(
-        "<b>Участники</b>\n" + "\n".join(f"• {name}" for name in sort_names(settings["people"])),
+        "<b>Участники</b>\n" + "\n".join(
+            f"• {name}{' ⛪' if name in ministers else ''}" for name in sort_names(settings["people"])
+        ),
         reply_markup=participants_menu_keyboard(require_admin(message)),
     )
 
@@ -622,6 +627,21 @@ async def remove_person_button(message: Message) -> None:
     await message.answer("Выберите участника:", reply_markup=participants_keyboard(settings["people"]))
 
 
+@router.message(F.text.in_({"⛪ Назначить служителем", "↩️ Убрать служителя"}))
+async def minister_role_button(message: Message) -> None:
+    settings = await load_settings()
+    adding = message.text == "⛪ Назначить служителем"
+    eligible = (
+        [name for name in settings["people"] if name not in settings["ministers"] and not is_guest_name(name)]
+        if adding else settings["ministers"]
+    )
+    if not eligible:
+        await answer_participants_menu(message, "Подходящих участников нет.")
+        return
+    pending_actions[message.from_user.id] = {"action": "minister_role", "adding": adding}
+    await message.answer("Выберите участника:", reply_markup=participants_keyboard(eligible))
+
+
 @router.message(F.text.in_({"📋 Списки ограничений", "Списки ограничений"}))
 async def lists_button(message: Message) -> None:
     if not require_admin(message):
@@ -707,6 +727,8 @@ async def text_handler(message: Message) -> None:
     elif action == "remove_person":
         pending_actions.pop(message.from_user.id, None)
         await remove_person(message, normalise_name(text))
+    elif action == "minister_role":
+        await handle_minister_role(message, state, text)
     elif action in {"replace_slot", "attendance_slot", "extra_slot"}:
         await handle_slot_selection(message, state, text)
     elif action == "replace_people":
@@ -995,12 +1017,32 @@ async def remove_person(message: Message, name: str) -> None:
         return
 
     settings["people"].remove(name)
+    settings["ministers"] = [value for value in settings["ministers"] if value != name]
 
     for key in ["blockedStart", "singleParticipation", "onlySunday"]:
         settings[key] = [value for value in settings[key] if value != name]
 
     await save_settings(settings)
     await message.answer(f"Участник удалён: {name}", reply_markup=participants_menu_keyboard(True))
+
+
+async def handle_minister_role(message: Message, state: dict[str, Any], name: str) -> None:
+    settings = await load_settings()
+    adding = state["adding"]
+    eligible = (
+        name in settings["people"] and name not in settings["ministers"] and not is_guest_name(name)
+        if adding else name in settings["ministers"]
+    )
+    if not eligible:
+        await message.answer("Выберите участника из списка.")
+        return
+    updated = await set_minister_role(name, adding)
+    pending_actions.pop(message.from_user.id, None)
+    if not updated:
+        await answer_participants_menu(message, "Не удалось изменить роль участника.")
+        return
+    action = "назначен служителем" if adding else "больше не служитель"
+    await message.answer(f"{name} {action}.", reply_markup=participants_menu_keyboard(True))
 
 
 async def update_named_list(message: Message, key: str, action: str, name: str) -> None:

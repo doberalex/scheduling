@@ -79,6 +79,7 @@ def format_settings(settings: dict) -> str:
         f"• Пятница: {settings['limits']['fri']}\n"
         f"• Воскресенье: {settings['limits']['sun']}\n\n"
         f"<b>Участники</b>\n{fmt_name_list(settings['people'])}\n\n"
+        f"<b>Служители</b>\n{fmt_name_list(settings['ministers'])}\n\n"
         f"<b>blockedStart</b>\n{fmt_name_list(settings['blockedStart'])}\n\n"
         f"<b>singleParticipation</b>\n{fmt_name_list(settings['singleParticipation'])}\n\n"
         f"<b>onlySunday</b>\n{fmt_name_list(settings['onlySunday'])}\n\n"

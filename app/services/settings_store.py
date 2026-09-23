@@ -30,6 +30,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "Артур Б.",
         "Тимур Х.",
     ],
+    "ministers": [],
     "limits": {
         "fri": 3,
         "sun": 5,
@@ -80,7 +81,7 @@ def _normalise(settings: dict[str, Any]) -> dict[str, Any]:
         **settings.get("extraDates", {}),
     }
 
-    for key in ["people", "blockedStart", "singleParticipation", "onlySunday"]:
+    for key in ["people", "ministers", "blockedStart", "singleParticipation", "onlySunday"]:
         result[key] = list(dict.fromkeys(result.get(key, [])))
 
     for key in ["fri", "sun"]:
@@ -129,6 +130,7 @@ async def init_db() -> None:
                     id INT UNSIGNED NOT NULL AUTO_INCREMENT,
                     name VARCHAR(255) NOT NULL,
                     is_active TINYINT NOT NULL DEFAULT 1,
+                    is_minister TINYINT NOT NULL DEFAULT 0,
                     sort_order INT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -137,6 +139,18 @@ async def init_db() -> None:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema=%s AND table_name='schedule_participants'
+                    AND column_name='is_minister'
+                """,
+                (DB_NAME,),
+            )
+            if (await cursor.fetchone())[0] == 0:
+                await cursor.execute(
+                    "ALTER TABLE schedule_participants ADD COLUMN is_minister TINYINT NOT NULL DEFAULT 0"
+                )
             await cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schedule_limits (
@@ -333,6 +347,7 @@ async def load_settings() -> dict[str, Any]:
     db_pool = await connect_db()
     settings = {
         "people": [],
+        "ministers": [],
         "limits": {},
         "blockedStart": [],
         "singleParticipation": [],
@@ -344,13 +359,15 @@ async def load_settings() -> dict[str, Any]:
         async with conn.cursor(aiomysql.DictCursor) as cursor:
             await cursor.execute(
                 """
-                SELECT name
+                SELECT name, is_minister
                 FROM schedule_participants
                 WHERE is_active=1
                 ORDER BY sort_order, id
                 """
             )
-            settings["people"] = [row["name"] for row in await cursor.fetchall()]
+            participant_rows = await cursor.fetchall()
+            settings["people"] = [row["name"] for row in participant_rows]
+            settings["ministers"] = [row["name"] for row in participant_rows if row["is_minister"]]
 
             await cursor.execute("SELECT slot_type, limit_value FROM schedule_limits")
             settings["limits"] = {
@@ -388,6 +405,18 @@ async def load_settings() -> dict[str, Any]:
     return _normalise(settings)
 
 
+async def set_minister_role(name: str, enabled: bool) -> bool:
+    await init_db()
+    db_pool = await connect_db()
+    async with db_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "UPDATE schedule_participants SET is_minister=%s WHERE name=%s AND is_active=1",
+                (int(enabled), name),
+            )
+            return cursor.rowcount > 0
+
+
 async def save_settings(settings: dict[str, Any]) -> None:
     settings = _normalise(settings)
     db_pool = await connect_db()
@@ -407,6 +436,7 @@ async def save_settings(settings: dict[str, Any]) -> None:
                     """,
                     (name, index),
                 )
+            await cursor.execute("UPDATE schedule_participants SET is_minister=0 WHERE is_active=0")
 
             await cursor.execute("DELETE FROM schedule_participant_lists")
 

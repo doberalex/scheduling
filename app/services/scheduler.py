@@ -740,13 +740,15 @@ def validate_schedule(
     single_participation: list[str],
     only_sunday: list[str],
     previous_participation_counts: dict[str, int] | None = None,
+    ministers: list[str] | None = None,
 ) -> list[str]:
     errors = []
     previous_participation_counts = previous_participation_counts or {}
+    minister_names = set(ministers or [])
 
     for slot_id, people in schedule.items():
         slot_type = slots[slot_id]
-        expected = int(limits[slot_type])
+        expected = int(limits[slot_type]) + (1 if slot_type == "sun" and minister_names else 0)
 
         if len(people) != expected:
             errors.append(f"Слот {slot_id}: назначено {len(people)} из {expected}")
@@ -754,7 +756,15 @@ def validate_schedule(
         if len(people) != len(set(people)):
             errors.append(f"Слот {slot_id}: есть повтор участника")
 
+        assigned_ministers = [person for person in people if person in minister_names]
+        if slot_type == "sun" and minister_names and len(assigned_ministers) != 1:
+            errors.append(f"Слот {slot_id}: должен быть назначен один служитель")
+        if slot_type != "sun" and assigned_ministers:
+            errors.append(f"Слот {slot_id}: служитель назначен не на воскресенье")
+
         for person in people:
+            if person in minister_names:
+                continue
             if person in blocked_start and slot_id in [1, 2]:
                 errors.append(f"{person}: запрещен слот {slot_id}")
 
@@ -762,6 +772,8 @@ def validate_schedule(
                 errors.append(f"{person}: разрешено только воскресенье, найден слот {slot_id}")
 
     for person, slots_list in person_slots.items():
+        if person in minister_names:
+            continue
         sorted_slots = sorted(slots_list)
         max_participation = get_max_participation(person, single_participation)
 
@@ -816,6 +828,8 @@ def get_start_capacity_error(people: list[str], slots: dict[int, str], limits: d
 
 def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int = 0) -> ScheduleResult:
     slots, slot_dates = build_month_slots(year, month, settings.get("extraDates", {}))
+    ministers = sorted(set(settings.get("ministers", [])) & set(settings["people"]), key=str.casefold)
+    regular_people = [person for person in settings["people"] if person not in ministers]
     seed_text = f"{year:04d}-{month:02d}"
     if seed_offset:
         seed_text = f"{seed_text}:{seed_offset}"
@@ -823,7 +837,7 @@ def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int =
     seed = zlib.crc32(seed_text.encode("utf-8"))
     greedy_seed = seed if seed_offset else None
     schedule, person_slots, resolved_slot_limits = build_schedule(
-        settings["people"],
+        regular_people,
         slots,
         settings["limits"],
         settings["blockedStart"],
@@ -833,6 +847,16 @@ def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int =
         settings.get("previousParticipationCounts", {}),
         greedy_seed,
     )
+    if ministers:
+        sunday_slots = [slot_id for slot_id, slot_type in slots.items() if slot_type == "sun"]
+        first_calendar_sunday = date(year, month, 1)
+        first_calendar_sunday += timedelta(days=(6 - first_calendar_sunday.weekday()) % 7)
+        rotation_start = (first_calendar_sunday - date(2020, 1, 5)).days // 7
+        for index, slot_id in enumerate(sunday_slots):
+            minister = ministers[(rotation_start + index) % len(ministers)]
+            schedule[slot_id].append(minister)
+            person_slots.setdefault(minister, []).append(slot_id)
+            resolved_slot_limits[slot_id] += 1
     errors = validate_schedule(
         schedule,
         person_slots,
@@ -842,9 +866,10 @@ def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int =
         settings["singleParticipation"],
         settings["onlySunday"],
         settings.get("previousParticipationCounts", {}),
+        ministers,
     )
     start_capacity_error = get_start_capacity_error(
-        settings["people"],
+        regular_people,
         slots,
         settings["limits"],
         settings["blockedStart"],
