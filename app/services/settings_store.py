@@ -681,7 +681,12 @@ async def replace_slot_participants(year: int, month: int, slot_no: int, names: 
                 (slot_id,),
             )
             reserved_names = {row[0] for row in await cursor.fetchall()}
-            if reserved_names.intersection(names):
+            if reserved_names:
+                await cursor.execute("SELECT name FROM schedule_participants WHERE is_active=1 AND is_minister=1")
+                active_ministers = {row[0] for row in await cursor.fetchall()}
+            else:
+                active_ministers = set()
+            if (reserved_names | active_ministers).intersection(names):
                 return False
 
             await cursor.execute(
@@ -793,6 +798,22 @@ async def add_extra_slot_participant(year: int, month: int, slot_no: int, name: 
                 return False
 
             participant_id = await _participant_id(cursor, name)
+            await cursor.execute(
+                "SELECT s.slot_type, p.is_active, p.is_minister FROM schedule_slots s JOIN schedule_participants p ON p.id=%s WHERE s.id=%s",
+                (participant_id, slot_id),
+            )
+            slot_role = await cursor.fetchone()
+            if slot_role and slot_role[0] == "sun" and slot_role[1] and slot_role[2]:
+                await cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM schedule_slot_participants sp
+                    JOIN schedule_participants p ON p.id=sp.participant_id
+                    WHERE sp.slot_id=%s AND (sp.is_minister_assignment=1 OR (p.is_active=1 AND p.is_minister=1))
+                    """,
+                    (slot_id,),
+                )
+                if (await cursor.fetchone())[0] > 0:
+                    return False
             await cursor.execute(
                 "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM schedule_slot_participants WHERE slot_id=%s",
                 (slot_id,),

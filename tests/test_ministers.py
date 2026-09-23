@@ -92,6 +92,32 @@ class MinisterScheduleTests(unittest.TestCase):
         errors = validate_saved_schedule(saved, self.settings)
         self.assertTrue(any("нет отдыха" in error for error in errors))
 
+    def test_saved_sunday_rejects_second_minister(self):
+        ministers = ["Алексей Б.", "Андрей К."]
+        self.settings["ministers"] = ministers
+        result = generate(self.settings, 2026, 10)
+        sunday = next(slot_id for slot_id, slot_type in result.slots.items() if slot_type == "sun")
+        special = result.minister_assignments[sunday]
+        other = next(name for name in ministers if name != special)
+        saved = {
+            "slots": [
+                {
+                    "slot_no": slot_id,
+                    "slot_type": slot_type,
+                    "participants": [
+                        {
+                            "name": other if slot_id == sunday and index == 0 else name,
+                            "is_scheduled": True,
+                            "is_minister_assignment": result.minister_assignments.get(slot_id) == name,
+                        }
+                        for index, name in enumerate(result.schedule[slot_id])
+                    ],
+                }
+                for slot_id, slot_type in result.slots.items()
+            ],
+        }
+        self.assertTrue(any("только один служитель" in error for error in validate_saved_schedule(saved, self.settings)))
+
     def test_minister_has_a_rest_slot_between_all_appointments(self):
         ministers = ["Алексей Б.", "Андрей К."]
         self.settings["ministers"] = ministers
@@ -102,8 +128,11 @@ class MinisterScheduleTests(unittest.TestCase):
                 result.person_slots[minister]
                 + [slot_id for slot_id, name in result.minister_assignments.items() if name == minister]
             )
-            self.assertGreaterEqual(len(result.person_slots[minister]), 2)
+            self.assertGreaterEqual(len(result.person_slots[minister]), 1)
             self.assertTrue(all(second - first >= 2 for first, second in zip(all_slots, all_slots[1:])))
+        for slot_id, slot_type in result.slots.items():
+            if slot_type == "sun":
+                self.assertEqual(1, sum(name in ministers for name in result.schedule[slot_id]))
 
 
 if __name__ == "__main__":

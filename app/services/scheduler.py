@@ -100,12 +100,13 @@ def valid_person_slot_types(
     single_participation: list[str],
     only_sunday: list[str],
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> bool:
     if not needs_both_slot_types(person, single_participation, only_sunday):
         return True
 
     sunday_slots = [slot_id for slot_id, slot_type in slots.items() if slot_type == "sun"]
-    if sunday_slots and all((minister_assignments or {}).get(slot_id) == person for slot_id in sunday_slots):
+    if person in (minister_names or set()) and sunday_slots and all(slot_id in (minister_assignments or {}) for slot_id in sunday_slots):
         return True
 
     if len(slots_list) < 2:
@@ -128,7 +129,9 @@ def create_empty_person_slots(people: list[str]) -> dict[str, list[int]]:
     return {person: [] for person in people}
 
 
-def basic_can_use_slot(person: str, slot_id: int, slots: dict[int, str], blocked_start: list[str], only_sunday: list[str], minister_assignments: dict[int, str] | None = None) -> bool:
+def basic_can_use_slot(person: str, slot_id: int, slots: dict[int, str], blocked_start: list[str], only_sunday: list[str], minister_assignments: dict[int, str] | None = None, minister_names: set[str] | None = None) -> bool:
+    if person in (minister_names or set()) and slots[slot_id] == "sun" and slot_id in (minister_assignments or {}):
+        return False
     if any(name == person and abs(special_slot - slot_id) < 2 for special_slot, name in (minister_assignments or {}).items()):
         return False
     if person in blocked_start and slot_id in [1, 2]:
@@ -140,11 +143,11 @@ def basic_can_use_slot(person: str, slot_id: int, slots: dict[int, str], blocked
     return True
 
 
-def get_allowed_slots_for_person(person: str, slots: dict[int, str], blocked_start: list[str], only_sunday: list[str], minister_assignments: dict[int, str] | None = None) -> list[int]:
+def get_allowed_slots_for_person(person: str, slots: dict[int, str], blocked_start: list[str], only_sunday: list[str], minister_assignments: dict[int, str] | None = None, minister_names: set[str] | None = None) -> list[int]:
     return [
         slot_id
         for slot_id in slots
-        if basic_can_use_slot(person, slot_id, slots, blocked_start, only_sunday, minister_assignments)
+        if basic_can_use_slot(person, slot_id, slots, blocked_start, only_sunday, minister_assignments, minister_names)
     ]
 
 
@@ -185,9 +188,10 @@ def get_person_options(
     seed: int,
     previous_participation_counts: dict[str, int] | None = None,
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> list[list[int]]:
     max_count = get_max_participation(person, single_participation)
-    allowed_slots = get_allowed_slots_for_person(person, slots, blocked_start, only_sunday, minister_assignments)
+    allowed_slots = get_allowed_slots_for_person(person, slots, blocked_start, only_sunday, minister_assignments, minister_names)
     options = []
     previous_count = (previous_participation_counts or {}).get(person, 0)
 
@@ -208,7 +212,7 @@ def get_person_options(
             options.append(combination)
             continue
 
-        if count >= 2 and valid_person_slot_types(person, combination, slots, single_participation, only_sunday, minister_assignments):
+        if count >= 2 and valid_person_slot_types(person, combination, slots, single_participation, only_sunday, minister_assignments, minister_names):
             options.append(combination)
 
     return sorted(
@@ -353,6 +357,7 @@ def try_build_schedule_by_person_options(
     previous_participation_counts: dict[str, int] | None = None,
     deadline: float | None = None,
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> tuple[bool, dict[int, list[str]], dict[str, list[int]]]:
     previous_participation_counts = previous_participation_counts or {}
     options_by_person = {}
@@ -367,6 +372,7 @@ def try_build_schedule_by_person_options(
             seed,
             previous_participation_counts,
             minister_assignments,
+            minister_names,
         )
 
         if not options:
@@ -407,7 +413,10 @@ def can_assign_with_slot_limits(
     single_participation: list[str],
     only_sunday: list[str],
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> bool:
+    if person in (minister_names or set()) and slots[slot_id] == "sun" and slot_id in (minister_assignments or {}):
+        return False
     if any(name == person and abs(special_slot - slot_id) < 2 for special_slot, name in (minister_assignments or {}).items()):
         return False
     if person in blocked_start and slot_id in [1, 2]:
@@ -486,6 +495,7 @@ def find_next_slot(
     single_participation: list[str],
     only_sunday: list[str],
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> tuple[int | None, list[str]]:
     best_slot_id = None
     best_candidates: list[str] = []
@@ -509,6 +519,7 @@ def find_next_slot(
                     single_participation,
                     only_sunday,
                     minister_assignments,
+                    minister_names,
                 )
             ],
             key=lambda person: compare_candidates(person, person_slots),
@@ -534,6 +545,7 @@ def build_greedy_schedule(
     seed: int | None,
     previous_participation_counts: dict[str, int] | None = None,
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> tuple[dict[int, list[str]], dict[str, list[int]]]:
     previous_participation_counts = previous_participation_counts or {}
     schedule = create_empty_schedule(slots)
@@ -563,6 +575,7 @@ def build_greedy_schedule(
                         single_participation,
                         only_sunday,
                         minister_assignments,
+                        minister_names,
                     )
                 ],
                 key=lambda person: compare_balanced_candidates(
@@ -602,6 +615,7 @@ def schedule_types_are_possible(
     single_participation: list[str],
     only_sunday: list[str],
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> bool:
     for person in people:
         if not needs_both_slot_types(person, single_participation, only_sunday):
@@ -610,7 +624,7 @@ def schedule_types_are_possible(
         slots_list = person_slots.get(person, [])
         max_participation = get_max_participation(person, single_participation)
 
-        if len(slots_list) >= max_participation and not valid_person_slot_types(person, slots_list, slots, single_participation, only_sunday, minister_assignments):
+        if len(slots_list) >= max_participation and not valid_person_slot_types(person, slots_list, slots, single_participation, only_sunday, minister_assignments, minister_names):
             return False
 
     return True
@@ -623,11 +637,12 @@ def final_schedule_types_are_valid(
     single_participation: list[str],
     only_sunday: list[str],
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> bool:
     for person in people:
         slots_list = person_slots.get(person, [])
 
-        if slots_list and not valid_person_slot_types(person, slots_list, slots, single_participation, only_sunday, minister_assignments):
+        if slots_list and not valid_person_slot_types(person, slots_list, slots, single_participation, only_sunday, minister_assignments, minister_names):
             return False
 
     return True
@@ -644,6 +659,7 @@ def fill_schedule_recursive(
     only_sunday: list[str],
     deadline: float | None = None,
     minister_assignments: dict[int, str] | None = None,
+    minister_names: set[str] | None = None,
 ) -> bool:
     if deadline is not None and monotonic() > deadline:
         raise ScheduleSearchTimeout()
@@ -658,10 +674,11 @@ def fill_schedule_recursive(
         single_participation,
         only_sunday,
         minister_assignments,
+        minister_names,
     )
 
     if slot_id is None:
-        return final_schedule_types_are_valid(person_slots, people, slots, single_participation, only_sunday, minister_assignments)
+        return final_schedule_types_are_valid(person_slots, people, slots, single_participation, only_sunday, minister_assignments, minister_names)
 
     if not candidates:
         return False
@@ -671,8 +688,8 @@ def fill_schedule_recursive(
         person_slots[person].append(slot_id)
 
         if (
-            schedule_types_are_possible(person_slots, people, slots, single_participation, only_sunday, minister_assignments)
-            and fill_schedule_recursive(schedule, person_slots, people, slots, slot_limits, blocked_start, single_participation, only_sunday, deadline, minister_assignments)
+            schedule_types_are_possible(person_slots, people, slots, single_participation, only_sunday, minister_assignments, minister_names)
+            and fill_schedule_recursive(schedule, person_slots, people, slots, slot_limits, blocked_start, single_participation, only_sunday, deadline, minister_assignments, minister_names)
         ):
             return True
 
@@ -694,18 +711,19 @@ def build_schedule(
     greedy_seed: int | None = None,
     minister_assignments: dict[int, str] | None = None,
     deadline: float | None = None,
+    minister_names: set[str] | None = None,
 ) -> tuple[dict[int, list[str]], dict[str, list[int]], dict[int, int]]:
     base_slot_limits = get_base_slot_limits(slots, limits)
     variants = [base_slot_limits]
     deadline = deadline if deadline is not None else monotonic() + SEARCH_TIMEOUT_SECONDS
 
     if any(
-        not get_allowed_slots_for_person(person, slots, blocked_start, only_sunday, minister_assignments)
+        not get_allowed_slots_for_person(person, slots, blocked_start, only_sunday, minister_assignments, minister_names)
         for person in people
     ):
         schedule, person_slots = build_greedy_schedule(
             people, slots, base_slot_limits, blocked_start, single_participation,
-            only_sunday, greedy_seed, previous_participation_counts, minister_assignments,
+            only_sunday, greedy_seed, previous_participation_counts, minister_assignments, minister_names,
         )
         return schedule, person_slots, base_slot_limits
 
@@ -733,6 +751,7 @@ def build_schedule(
                 previous_participation_counts,
                 deadline,
                 minister_assignments,
+                minister_names,
             )
 
             if success:
@@ -752,6 +771,7 @@ def build_schedule(
                 only_sunday,
                 deadline,
                 minister_assignments,
+                minister_names,
             ):
                 return schedule, person_slots, slot_limits
         except ScheduleSearchTimeout:
@@ -767,6 +787,7 @@ def build_schedule(
         greedy_seed,
         previous_participation_counts,
         minister_assignments,
+        minister_names,
     )
     return schedule, person_slots, base_slot_limits
 
@@ -782,10 +803,12 @@ def validate_schedule(
     previous_participation_counts: dict[str, int] | None = None,
     ministers: list[str] | None = None,
     minister_assignments: dict[int, str] | None = None,
+    all_ministers: list[str] | None = None,
 ) -> list[str]:
     errors = []
     previous_participation_counts = previous_participation_counts or {}
     minister_names = set(ministers or [])
+    active_ministers = set(all_ministers or ministers or []) | minister_names
     minister_assignments = minister_assignments or {}
 
     for slot_id, people in schedule.items():
@@ -801,6 +824,8 @@ def validate_schedule(
         assigned_minister = minister_assignments.get(slot_id)
         if slot_type == "sun" and minister_names and (not assigned_minister or people.count(assigned_minister) != 1):
             errors.append(f"Слот {slot_id}: должен быть назначен один служитель")
+        if slot_type == "sun" and assigned_minister and sum(person in active_ministers for person in people) != 1:
+            errors.append(f"Слот {slot_id}: в воскресенье должен быть только один служитель")
         if slot_type != "sun" and assigned_minister:
             errors.append(f"Слот {slot_id}: служитель назначен не на воскресенье")
 
@@ -832,7 +857,7 @@ def validate_schedule(
         ):
             errors.append(f"{person}: не должен участвовать 1 раз два месяца подряд")
 
-        if sorted_slots and not valid_person_slot_types(person, sorted_slots, slots, single_participation, only_sunday, minister_assignments):
+        if sorted_slots and not valid_person_slot_types(person, sorted_slots, slots, single_participation, only_sunday, minister_assignments, active_ministers):
             errors.append(f"{person}: должны быть участия и в пятницу, и в воскресенье")
 
         for first_index, first_slot in enumerate(sorted_slots):
@@ -950,7 +975,7 @@ def generate(settings: dict[str, Any], year: int, month: int, seed_offset: int =
             settings["people"], slots, settings["limits"], settings["blockedStart"],
             settings["singleParticipation"], settings["onlySunday"], seed,
             settings.get("previousParticipationCounts", {}), greedy_seed,
-            minister_assignments, attempt_deadline,
+            minister_assignments, attempt_deadline, set(ministers),
         )
         for slot_id, minister in minister_assignments.items():
             schedule[slot_id].append(minister)
